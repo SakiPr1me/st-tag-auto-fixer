@@ -3,18 +3,18 @@ import { saveSettingsDebounced } from "../../../../script.js";
 
 const extensionName = "tag_auto_fixer";
 const defaultTagTree = `scene
-	content
-	Danmaku
-	Advance
-	  choice
-	  todo
-	  remind
-	  status
-	Events
-	summary
-	extra
-	NG_scene
-	lts`;
+content
+Danmaku
+Advance
+	choice
+	todo
+		R
+	remind
+Events
+	I
+summary
+extra
+NG_scene`;
 
 const defaultSettings = { tagTree: defaultTagTree };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
