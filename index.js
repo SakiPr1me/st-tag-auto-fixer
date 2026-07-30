@@ -450,41 +450,39 @@ async function fixLastMessage() {
 
 		console.log(`[TagAutoFixer] 修复了 ${result.fixed} 个标签`);
 
-		// setChatMessages 是 Slash Runner 注入到全局的函数，同时负责数据更新 + 保存 + 渲染
-		// 格式和双击编辑插件一样：先直接改 chat 数组，再调 setChatMessages
-		const scm = window.setChatMessages || ctx?.setChatMessages;
+		// TavernHelper 是 Slash Runner 暴露到 window 的稳定 API
+		// setChatMessages 同时负责数据更新 + 保存 + 触发渲染（含 Regex 美化）
+		const TH = window.TavernHelper;
 		let rendered = false;
 
-		if (typeof scm === 'function') {
+		if (TH?.setChatMessages) {
+			try {
+				await TH.setChatMessages([{ message_id: lastIdx, message: result.text }]);
+				rendered = true;
+				console.log('[TagAutoFixer] 通过 TavernHelper.setChatMessages 触发渲染');
+			} catch (e) {
+				console.warn('[TagAutoFixer] TavernHelper.setChatMessages 失败:', e);
+			}
+		}
+
+		if (!rendered && TH?.refreshOneMessage) {
+			// 回退：手动写数据 + 保存 + 单独触发渲染
 			try {
 				lastMsg.mes = result.text;
-				await scm([{ message_id: lastIdx, message: result.text }]);
+				if (ctx.saveChat) await ctx.saveChat();
+				await TH.refreshOneMessage(lastIdx);
 				rendered = true;
-				console.log('[TagAutoFixer] 通过 setChatMessages 触发渲染（Regex 美化应该已生效）');
+				console.log('[TagAutoFixer] 通过 TavernHelper.refreshOneMessage 触发渲染');
 			} catch (e) {
-				console.warn('[TagAutoFixer] setChatMessages 失败:', e);
+				console.warn('[TagAutoFixer] refreshOneMessage 失败:', e);
 			}
 		}
 
 		if (!rendered) {
-			// 回退：手动保存 + CHAT_CHANGED 完整重载
+			// 最后回退：手动保存 + DOM
 			lastMsg.mes = result.text;
 			if (ctx.saveChat) await ctx.saveChat();
-			if (ctx.eventSource && ctx.eventTypes?.CHAT_CHANGED) {
-				ctx.eventSource.emit(ctx.eventTypes.CHAT_CHANGED, ctx.chatId);
-				rendered = true;
-				console.log('[TagAutoFixer] 通过 CHAT_CHANGED 触发完整聊天重渲染');
-			}
-		}
-
-		if (!rendered) {
-			// 最后回退：DOM 直接操作（Regex 美化不会触发）
-			const $mes = $(`#chat .mes[mesid="${lastIdx}"]`);
-			if ($mes.length > 0) {
-				$mes.find('.mes_text').html(`<pre>${$('<div>').text(result.text).html()}</pre>`);
-				rendered = true;
-				console.log('[TagAutoFixer] 通过 DOM 直接刷新（Regex 美化可能未触发）');
-			}
+			console.log('[TagAutoFixer] 已保存数据但未能触发渲染');
 		}
 
 		toastr?.success?.(rendered
