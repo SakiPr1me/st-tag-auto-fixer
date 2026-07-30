@@ -216,13 +216,17 @@ async function fixLastMessage() {
         return '';
     }
 
-    lastMsg.mes = result.text;
+    window.SillyTavern.chat[lastIdx].mes = result.text;
 
     try { await ctx.saveChat?.(); } catch (_) {}
 
     try {
-        if (window.SillyTavern?.refreshChat) {
-            window.SillyTavern.refreshChat();
+        if (window.setChatMessages) {
+            window.setChatMessages([{ message_id: lastIdx, message: result.text }]);
+        } else if (window.SillyTavern?.setChatMessages) {
+            window.SillyTavern.setChatMessages([{ message_id: lastIdx, message: result.text }]);
+        } else {
+            window.SillyTavern?.refreshChat?.();
         }
     } catch (_) {
         window.location.reload();
