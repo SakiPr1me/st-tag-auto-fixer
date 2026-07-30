@@ -328,22 +328,63 @@ function scanAndFill() {
 	toastr?.success?.(`✅ 标签树已重建（${structureNames} 个结构标签，${totalNames - structureNames} 个内联标签已过滤）`);
 }
 
-// ========== 栈式算法修复标签（同级互斥、补开补闭）==========
+// ========== 栈式算法修复标签（同级互斥、补开补闭 + 残缺标签补全）==========
 
 function fixTagsInText(text) {
 	const { allTags: tags, siblings } = parseTagTree();
 	if (!tags.length) return { text, fixed: 0 };
 
-	// 构建正则：匹配所有已配置标签的开/闭标签（排除自闭合）
 	const escaped = tags.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+	// ===== 预处理：残缺标签补全（如 </Ad → </Advance>）=====
+	let body = text;
+	let prepFix = 0;
+
+	// 扫描所有 < 或 </ 后跟不完整标签名的情况
+	const partialRe = /<(\/?)([a-zA-Z_][a-zA-Z0-9_.-]*)(?=[^a-zA-Z0-9_.->]|$)/g;
+	const partialFixes = []; // [{ pos, oldLen, replacement }]
+	let pm;
+	while ((pm = partialRe.exec(body)) !== null) {
+		const isClose = pm[1] === '/';
+		const partialName = pm[2];
+		const fullStr = pm[0]; // e.g., "</Adv" or "<Adva"
+
+		// 检查后面是否跟着 >（如果是，则是完整标签，跳过）
+		const after = body.slice(pm.index + fullStr.length);
+		if (after.match(/^\s*>/)) continue;
+
+		// 检查是否本身就是完整标签名（如 </Advance 后面可能有属性）
+		const exactMatch = tags.some(t => t.toLowerCase() === partialName.toLowerCase());
+		if (exactMatch) continue; // 名字完整，只是缺了 >，不算残缺
+
+		// 前缀匹配已知标签
+		const candidates = tags.filter(t => t.toLowerCase().startsWith(partialName.toLowerCase()));
+
+		if (candidates.length === 1) {
+			// 唯一匹配 → 补全
+			const complete = isClose ? `</${candidates[0]}>` : `<${candidates[0]}>`;
+			partialFixes.push({ pos: pm.index, oldLen: fullStr.length, replacement: complete });
+		}
+		// 多个匹配 → 不处理（歧义）
+	}
+
+	// 从后往前应用补全（保持位置偏移不变）
+	partialFixes.sort((a, b) => b.pos - a.pos);
+	for (const pf of partialFixes) {
+		body = body.slice(0, pf.pos) + pf.replacement + body.slice(pf.pos + pf.oldLen);
+		prepFix++;
+	}
+	// ===== 预处理结束 =====
+
+	// 匹配所有完整标签
 	const tagRe = new RegExp(`<\\/?(${escaped.join('|')})\\b[^>]*?(?<!\\/)>`, 'gi');
 
 	const stack = [];       // [{ name }]
-	const orphanCloses = []; // 孤立的闭合标签名
+	const orphanCloses = []; // 孤立的闭合标签名（需要补开标签）
 	const fixPoints = [];   // [{ name, pos }] 需要补闭的位置
 
 	let m;
-	while ((m = tagRe.exec(text)) !== null) {
+	while ((m = tagRe.exec(body)) !== null) {
 		const full = m[0];
 		const name = m[1];
 		const pos = m.index;
@@ -355,22 +396,19 @@ function fixTagsInText(text) {
 				if (stack[i].name.toLowerCase() === name.toLowerCase()) { found = i; break; }
 			}
 			if (found >= 0) {
-				// 找到了 → 弹出该标签及其以上的所有子标签
-				//（子标签没被正常闭合说明 AI 掉了它们的闭合标签）
+				// 弹出该标签及其以上的所有子标签（子标签没闭合 = AI 掉了）
 				while (stack.length > found) {
 					const popped = stack.pop();
 					if (popped.name.toLowerCase() !== name.toLowerCase()) {
-						fixPoints.push({ name: popped.name, pos }); // 先补闭子标签
+						fixPoints.push({ name: popped.name, pos });
 					}
 				}
 			} else {
-				// 栈里没有 → 是孤儿闭标签（需要补开标签）
 				orphanCloses.push(name);
 			}
 		} else {
-			// 开标签
+			// 开标签：检查同级互斥
 			if (siblings.has(name)) {
-				// 是同级标签 → 闭合栈中所有已打开的同级标签（及其子标签）
 				for (let i = stack.length - 1; i >= 0; i--) {
 					if (siblings.has(stack[i].name) && stack[i].name.toLowerCase() !== name.toLowerCase()) {
 						// 从该同级位置到栈顶全部闭合（先子后父）
@@ -386,14 +424,24 @@ function fixTagsInText(text) {
 		}
 	}
 
-	// 从后往前插入补闭标签（保持位置偏移不变）
+	// ===== 应用补闭：同位置合并为一整块插入（保证内先外后）=====
 	fixPoints.sort((a, b) => b.pos - a.pos);
-	let body = text;
-	let fixed = 0;
+	let fixed = prepFix;
 
-	for (const fp of fixPoints) {
-		body = body.slice(0, fp.pos) + `</${fp.name}>\n` + body.slice(fp.pos);
-		fixed++;
+	// 合并同位置的 fixPoints
+	const grouped = [];
+	for (let i = 0; i < fixPoints.length; i++) {
+		if (i === 0 || fixPoints[i].pos !== fixPoints[i - 1].pos) {
+			grouped.push({ pos: fixPoints[i].pos, names: [fixPoints[i].name] });
+		} else {
+			grouped[grouped.length - 1].names.push(fixPoints[i].name);
+		}
+	}
+
+	for (const g of grouped) {
+		const block = g.names.map(n => `</${n}>\n`).join('');
+		body = body.slice(0, g.pos) + block + body.slice(g.pos);
+		fixed += g.names.length;
 	}
 
 	// 前置补开标签（孤儿闭标签）
