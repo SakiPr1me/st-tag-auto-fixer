@@ -65,7 +65,6 @@ function scanAndFill() {
 
     if (!allTags.length) { toastr?.info?.('未检测到任何标签'); return; }
 
-    // 第1步：构建开闭区间
     const ranges = [];
     const openStack = [];
     for (const t of allTags) {
@@ -83,7 +82,6 @@ function scanAndFill() {
     }
     if (!ranges.length) { toastr?.info?.('未检测到任何闭合标签对'); return; }
 
-    // 第2步：推断父子关系
     for (const parent of ranges) {
         for (const child of ranges) {
             if (child.name !== parent.name && child.start > parent.start && child.end < parent.end) {
@@ -92,7 +90,6 @@ function scanAndFill() {
         }
     }
 
-    // 第3步：过滤内联标签（无子标签 + 出现多次 = 内联）
     const hasChildren = new Set();
     for (const r of ranges) { if (r.children.size > 0) hasChildren.add(r.name); }
     const kept = new Set();
@@ -101,7 +98,6 @@ function scanAndFill() {
         if (hasChildren.has(r.name) || count <= 1) kept.add(r.name);
     }
 
-    // 第4步：找根级标签
     const allChildNames = new Set();
     for (const r of ranges) {
         if (kept.has(r.name)) {
@@ -110,7 +106,6 @@ function scanAndFill() {
     }
     const rootCandidates = ranges.filter(r => kept.has(r.name) && !allChildNames.has(r.name));
 
-    // 第5步：递归构建缩进树
     const builtTree = [];
     function addBranch(tag, depth) {
         const prefix = '  '.repeat(depth);
@@ -202,7 +197,7 @@ function getContext() {
     return null;
 }
 
-// ====== 主修复函数（async await 保证保存和渲染完成） ======
+// ====== 主修复函数 ======
 async function fixLastMessage() {
     const ctx = getContext();
     if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息') || alert('没有聊天消息'); return ''; }
@@ -223,14 +218,14 @@ async function fixLastMessage() {
 
     lastMsg.mes = result.text;
 
-    try { await ctx.saveChat?.(); } catch (_) { try { window.saveChat?.(); } catch (_) {} }
+    try { await ctx.saveChat?.(); } catch (_) {}
 
     try {
-        await ctx.reloadChat?.();
-    } catch (_) {
-        try { await ctx.reloadAndRenderChatWithoutEvents?.(); } catch (_) {
-            try { window.triggerSlash?.('/reload-chat'); } catch (_) {}
+        if (window.SillyTavern?.refreshChat) {
+            window.SillyTavern.refreshChat();
         }
+    } catch (_) {
+        window.location.reload();
     }
 
     toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`) || alert(`✅ 已修复 ${result.fixed} 个标签`);
@@ -241,7 +236,6 @@ async function fixLastMessage() {
 jQuery(async () => {
     const ctx = getContext();
 
-    // 入口1：斜杠命令 /fix-tags
     if (ctx?.SlashCommandParser) {
         try {
             ctx.SlashCommandParser.addCommand('fix-tags', fixLastMessage,
@@ -250,14 +244,12 @@ jQuery(async () => {
         } catch (_) {}
     }
 
-    // 入口2：发送按钮旁的图标
     const btnId = `${extensionName}_send_btn`;
     const btn = `<div id="${btnId}" class="fa-solid fa-tag interactable" title="修复标签" style="cursor:pointer;padding:0 6px;font-size:1.05em;opacity:0.65"></div>`;
     const left = $('#leftSendForm'), right = $('#rightSendForm');
     const target = left.length ? left : (right.length ? right : null);
     if (target) { target.prepend(btn); $(`#${btnId}`).on('click', async () => { await fixLastMessage(); }); }
 
-    // 入口3：扩展面板
     const h = `
 <div class="extension-settings" id="${extensionName}_s">
 <div class="inline-drawer">
