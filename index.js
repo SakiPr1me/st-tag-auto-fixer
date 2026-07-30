@@ -16,10 +16,12 @@ summary
 extra
 NG_scene`;
 
-const defaultSettings = { tagTree: defaultTagTree };
+const defaultSettings = { tagTree: defaultTagTree, showInlineBtn: true, showFloatingBtn: false };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
 if (!settings.tagTree) settings.tagTree = defaultTagTree;
+if (settings.showInlineBtn === undefined) settings.showInlineBtn = true;
+if (settings.showFloatingBtn === undefined) settings.showFloatingBtn = false;
 
 // ========== 解析标签树（缩进 → 嵌套层级）==========
 
@@ -687,15 +689,36 @@ jQuery(async () => {
 		}
 	}
 
-	// 注入发送按钮旁的修复图标
-	const btnId = `${extensionName}_send_btn`;
-	const btnHtml = `<div id="${btnId}" class="fa-solid fa-tag interactable" title="修复标签" style="cursor:pointer;padding:0 6px;font-size:1.05em;opacity:0.65"></div>`;
-	const left = $('#leftSendForm'), right = $('#rightSendForm');
-	const target = left.length ? left : (right.length ? right : null);
-	if (target) {
-		target.prepend(btnHtml);
-		$(`#${btnId}`).on('click', async () => { await fixLastMessage(); });
+	// 内联按钮：发送按钮旁的小图标
+	const inlineBtnId = `${extensionName}_send_btn`;
+	function updateInlineBtn() {
+		$(`#${inlineBtnId}`).remove();
+		if (!settings.showInlineBtn) return;
+		const btnHtml = `<div id="${inlineBtnId}" class="fa-solid fa-tag interactable" title="修复标签" style="cursor:pointer;padding:0 4px;font-size:0.85em;opacity:0.55;margin-right:2px"></div>`;
+		const left = $('#leftSendForm'), right = $('#rightSendForm');
+		const target = left.length ? left : (right.length ? right : null);
+		if (target) {
+			target.prepend(btnHtml);
+			$(`#${inlineBtnId}`).on('click', async () => { await fixLastMessage(); });
+		}
 	}
+	updateInlineBtn();
+
+	// 悬浮按钮
+	const floatBtnId = `${extensionName}_float_btn`;
+	function updateFloatingBtn() {
+		$(`#${floatBtnId}`).remove();
+		if (!settings.showFloatingBtn) return;
+		$('body').append(`<div id="${floatBtnId}" title="修复标签" style="
+			position:fixed;bottom:80px;right:20px;z-index:9999;
+			width:36px;height:36px;border-radius:50%;background:var(--accent-color, #888);
+			color:#fff;display:flex;align-items:center;justify-content:center;
+			cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);font-size:14px;
+			opacity:0.7;transition:opacity 0.2s;
+		" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.7'">🏷️</div>`);
+		$(`#${floatBtnId}`).on('click', async () => { await fixLastMessage(); });
+	}
+	updateFloatingBtn();
 
 	// 注入设置面板
 	const h = `
@@ -720,8 +743,13 @@ jQuery(async () => {
 	</div>
 	<button id="${extensionName}_btn" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">🔧 修复最后一条消息</button>
 
+	<div style="margin-top:8px;font-size:0.8em;display:flex;gap:12px;align-items:center">
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_inline" ${settings.showInlineBtn ? 'checked' : ''}> 发送按钮旁图标</label>
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_float" ${settings.showFloatingBtn ? 'checked' : ''}> 右下悬浮按钮</label>
+	</div>
+
 <p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
-也可用 <code>/fix-tags</code> 或点发送按钮旁 🏷️ 图标
+也可用 <code>/fix-tags</code> 斜杠命令
 </p>
 
 </div></div></div>`;
@@ -743,5 +771,17 @@ jQuery(async () => {
 		$(`#${extensionName}_tree`).val(defaultTagTree);
 		saveSettingsDebounced();
 		toastr?.success?.('✅ 已重置为默认标签树');
+	});
+
+	// UI 模式切换
+	$(`#${extensionName}_chk_inline`).on('change', function() {
+		settings.showInlineBtn = this.checked;
+		saveSettingsDebounced();
+		updateInlineBtn();
+	});
+	$(`#${extensionName}_chk_float`).on('change', function() {
+		settings.showFloatingBtn = this.checked;
+		saveSettingsDebounced();
+		updateFloatingBtn();
 	});
 });
