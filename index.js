@@ -171,18 +171,53 @@ function scanAndFill() {
 		for (const r of rootCandidates) kept.add(r.name);
 	}
 
-	// 生成缩进树
-	const builtTree = [];
-	function addBranch(tag, depth) {
-		const prefix = '  '.repeat(depth);
-		builtTree.push(prefix + tag.name);
-		for (const childName of tag.children) {
-			if (!kept.has(childName)) continue;
-			const childRange = ranges.find(r => r.name === childName);
-			if (childRange) addBranch(childRange, depth + 1);
+	// ===== 去重 + 合并：同名标签只保留一个，children 取并集 =====
+	const tagMeta = {}; // { name: { firstPos, children: Set } }
+	for (const r of ranges) {
+		if (!kept.has(r.name)) continue;
+		if (!tagMeta[r.name]) {
+			tagMeta[r.name] = { firstPos: r.start, children: new Set() };
+		} else if (r.start < tagMeta[r.name].firstPos) {
+			tagMeta[r.name].firstPos = r.start;
+		}
+		for (const c of r.children) {
+			if (kept.has(c) && c !== r.name) tagMeta[r.name].children.add(c);
 		}
 	}
-	for (const root of rootCandidates) { addBranch(root, 0); }
+
+	// 找去重后的根级标签
+	const allChildNamesDedup = new Set();
+	for (const [name, meta] of Object.entries(tagMeta)) {
+		for (const c of meta.children) allChildNamesDedup.add(c);
+	}
+	const rootNames = Object.keys(tagMeta).filter(n => !allChildNamesDedup.has(n));
+	if (!rootNames.length) {
+		// 回退：所有标签都是根级
+		rootNames.push(...Object.keys(tagMeta));
+	}
+
+	// 按最早出现位置排序
+	rootNames.sort((a, b) => (tagMeta[a]?.firstPos || 0) - (tagMeta[b]?.firstPos || 0));
+
+	// 构建缩进树（递归，visited 防止循环）
+	const builtTree = [];
+	const visited = new Set();
+	function addBranch(name, depth) {
+		if (visited.has(name)) return;
+		visited.add(name);
+		const meta = tagMeta[name];
+		if (!meta) return;
+		const prefix = '  '.repeat(depth);
+		builtTree.push(prefix + name);
+		const sortedChildren = [...meta.children]
+			.filter(c => tagMeta[c] && c !== name)
+			.sort((a, b) => (tagMeta[a]?.firstPos || 0) - (tagMeta[b]?.firstPos || 0));
+		for (const childName of sortedChildren) {
+			if (visited.has(childName)) continue;
+			addBranch(childName, depth + 1);
+		}
+	}
+	for (const rootName of rootNames) { addBranch(rootName, 0); }
 
 	if (!builtTree.length) {
 		toastr?.info?.('扫描完成但未能推断标签层级。请手动调整缩进。');
@@ -194,8 +229,9 @@ function scanAndFill() {
 	$(`#${extensionName}_tree`).val(settings.tagTree);
 	saveSettingsDebounced();
 
-	const totalNames = new Set(ranges.map(r => r.name));
-	toastr?.success?.(`✅ 标签树已重建（${kept.size} 个结构标签，${totalNames.size - kept.size} 个内联标签已过滤）`);
+	const structureNames = Object.keys(tagMeta).length;
+	const totalNames = new Set(ranges.map(r => r.name)).size;
+	toastr?.success?.(`✅ 标签树已重建（${structureNames} 个结构标签，${totalNames - structureNames} 个内联标签已过滤）`);
 }
 
 // ========== 栈式算法修复标签（同级互斥、补开补闭）==========
