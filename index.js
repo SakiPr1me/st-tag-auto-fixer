@@ -178,7 +178,7 @@ function scanAndFill() {
 				firstPosMap[t.name] = t.pos;
 			}
 		}
-		roots.sort((a, b) => (firstPosMap[a] || 0) - (firstPosMap[b] || 0));
+		roots.sort((a, b) => (firstPosMap[a] ?? 1e9) - (firstPosMap[b] ?? 1e9));
 
 		// 构建缩进树
 		const fallbackTree = [];
@@ -189,7 +189,7 @@ function scanAndFill() {
 			const prefix = '  '.repeat(depth);
 			fallbackTree.push(prefix + name);
 			const kids = [...(cleanEnclosure[name] || [])].filter(c => !vb.has(c));
-			kids.sort((a, b) => (firstPosMap[a] || 0) - (firstPosMap[b] || 0));
+			kids.sort((a, b) => (firstPosMap[a] ?? 1e9) - (firstPosMap[b] ?? 1e9));
 			for (const kid of kids) walk(kid, depth + 1);
 		}
 		for (const r of roots) walk(r, 0);
@@ -304,7 +304,7 @@ function scanAndFill() {
 	}
 
 	// 按最早出现位置排序（已有标签在 Infinity，排最后）
-	rootNames.sort((a, b) => (tagMeta[a]?.firstPos || 1e9) - (tagMeta[b]?.firstPos || 1e9));
+	rootNames.sort((a, b) => (tagMeta[a]?.firstPos ?? 1e9) - (tagMeta[b]?.firstPos ?? 1e9));
 
 	// 构建缩进树（递归，visited 防止循环）
 	const builtTree = [];
@@ -318,7 +318,7 @@ function scanAndFill() {
 		builtTree.push(prefix + name);
 		const sortedChildren = [...meta.children]
 			.filter(c => tagMeta[c] && c !== name)
-			.sort((a, b) => (tagMeta[a]?.firstPos || 0) - (tagMeta[b]?.firstPos || 0));
+			.sort((a, b) => (tagMeta[a]?.firstPos ?? 0) - (tagMeta[b]?.firstPos ?? 0));
 		for (const childName of sortedChildren) {
 			if (visited.has(childName)) continue;
 			addBranch(childName, depth + 1);
