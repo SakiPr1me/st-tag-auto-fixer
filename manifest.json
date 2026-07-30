@@ -1,0 +1,7 @@
+{
+    "name": "Tag Auto Fixer",
+    "description": "斜杠命令 /fix-tags 一键修复AI输出中缺失的XML标签闭合。栈式算法，支持嵌套。",
+    "version": "1.0.0",
+    "author": "Local",
+    "js": ["index.js"]
+}
