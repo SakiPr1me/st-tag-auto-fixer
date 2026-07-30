@@ -486,22 +486,30 @@ function fixTagsInText(text) {
 		return false;
 	}
 
-	// 祖先优先排序：父标签先确定位置，子标签可以用它的虚拟锚点
+	// 子孙优先排序：子标签先确定位置，父标签汇总取最早锚点
 	orphanCloses.sort((a, b) => {
-		if (isParentOrAncestor(a.name, b.name)) return -1;
-		if (isParentOrAncestor(b.name, a.name)) return 1;
+		if (isParentOrAncestor(a.name, b.name)) return 1;   // a 是父 → a 后处理
+		if (isParentOrAncestor(b.name, a.name)) return -1;  // b 是父 → b 后处理
 		return 0;
 	});
 
 	for (const oc of orphanCloses) {
 		const descendants = getDescendants(oc.name);
 
-		// 策略 A：找最早出现的子孙开标签，插在它前面
+		// 策略 A：找最早出现的子孙开标签 + 子孙的虚拟锚点，取最小值
 		const childHits = seenTags.filter(t => !t.isClose && descendants.has(t.name) && t.pos < oc.pos);
-		if (childHits.length > 0) {
-			const pos = Math.min(...childHits.map(t => t.pos));
-			virtualPositions[oc.name] = pos;
-			orphanFixPoints.push({ pos, name: oc.name });
+		let earliestPos = childHits.length > 0 ? Math.min(...childHits.map(t => t.pos)) : Infinity;
+
+		// 子孙标签已经被处理过（子孙优先排序），用它们的虚拟锚点作为更早的上界
+		for (const [cName, cPos] of Object.entries(virtualPositions)) {
+			if (isParentOrAncestor(oc.name, cName) && cPos < earliestPos) {
+				earliestPos = cPos;
+			}
+		}
+
+		if (earliestPos < Infinity) {
+			virtualPositions[oc.name] = earliestPos;
+			orphanFixPoints.push({ pos: earliestPos, name: oc.name });
 			continue;
 		}
 
@@ -526,6 +534,17 @@ function fixTagsInText(text) {
 			for (const [pName, pPos] of Object.entries(virtualPositions)) {
 				if (isParentOrAncestor(pName, oc.name) && pPos > anchorPos) {
 					anchorPos = pPos;
+				}
+			}
+		}
+
+		// 锚点钳制：开标签绝不能落在闭标签之后
+		if (anchorPos === 0 || anchorPos > oc.pos) {
+			anchorPos = 0;
+			for (let j = seenTags.length - 1; j >= 0; j--) {
+				if (seenTags[j].pos < oc.pos) {
+					anchorPos = seenTags[j].pos + seenTags[j].len;
+					break;
 				}
 			}
 		}
