@@ -134,7 +134,7 @@ function scanAndFill() {
     toastr?.success?.(`✅ 标签树已重建（${kept.size} 个结构标签，${totalNames.size - kept.size} 个内联标签已过滤）`);
 }
 
-// ====== 修复标签 ======
+// ====== 修复标签文本 ======
 function fixTagsInText(text) {
     const { allTags: tags, siblings } = parseTagTree();
     if (!tags.length) return { text, fixed: 0 };
@@ -202,8 +202,8 @@ function getContext() {
     return null;
 }
 
-// ====== 主修复函数 ======
-function fixLastMessage() {
+// ====== 主修复函数（async await 保证保存和渲染完成） ======
+async function fixLastMessage() {
     const ctx = getContext();
     if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息') || alert('没有聊天消息'); return ''; }
 
@@ -223,19 +223,14 @@ function fixLastMessage() {
 
     lastMsg.mes = result.text;
 
-    try { ctx.saveChat?.(); } catch (_) {}
-    try { ctx.forceSaveChat?.(); } catch (_) {}
+    try { await ctx.saveChat?.(); } catch (_) { try { window.saveChat?.(); } catch (_) {} }
 
     try {
-        if (ctx.reloadMessage) {
-            ctx.reloadMessage(lastIdx);
-        } else if (ctx.renderMessage) {
-            ctx.renderMessage(lastIdx);
-        } else {
-            ctx.reloadChat?.();
-        }
+        await ctx.reloadChat?.();
     } catch (_) {
-        try { window.triggerSlash?.('/reload-chat'); } catch (_) {}
+        try { await ctx.reloadAndRenderChatWithoutEvents?.(); } catch (_) {
+            try { window.triggerSlash?.('/reload-chat'); } catch (_) {}
+        }
     }
 
     toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`) || alert(`✅ 已修复 ${result.fixed} 个标签`);
@@ -243,8 +238,10 @@ function fixLastMessage() {
 }
 
 // ====== 入口注册 ======
-jQuery(() => {
+jQuery(async () => {
     const ctx = getContext();
+
+    // 入口1：斜杠命令 /fix-tags
     if (ctx?.SlashCommandParser) {
         try {
             ctx.SlashCommandParser.addCommand('fix-tags', fixLastMessage,
@@ -253,12 +250,14 @@ jQuery(() => {
         } catch (_) {}
     }
 
+    // 入口2：发送按钮旁的图标
     const btnId = `${extensionName}_send_btn`;
     const btn = `<div id="${btnId}" class="fa-solid fa-tag interactable" title="修复标签" style="cursor:pointer;padding:0 6px;font-size:1.05em;opacity:0.65"></div>`;
     const left = $('#leftSendForm'), right = $('#rightSendForm');
     const target = left.length ? left : (right.length ? right : null);
-    if (target) { target.prepend(btn); $(`#${btnId}`).on('click', () => fixLastMessage()); }
+    if (target) { target.prepend(btn); $(`#${btnId}`).on('click', async () => { await fixLastMessage(); }); }
 
+    // 入口3：扩展面板
     const h = `
 <div class="extension-settings" id="${extensionName}_s">
 <div class="inline-drawer">
@@ -294,5 +293,5 @@ jQuery(() => {
     });
 
     $(`#${extensionName}_scan`).on('click', scanAndFill);
-    $(`#${extensionName}_btn`).on('click', () => fixLastMessage());
+    $(`#${extensionName}_btn`).on('click', async () => { await fixLastMessage(); });
 });
