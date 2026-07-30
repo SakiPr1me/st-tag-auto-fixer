@@ -395,7 +395,7 @@ function fixTagsInText(text) {
 	const stack = [];         // [{ name }]
 	const orphanCloses = [];   // [{ name, pos }] 孤立的闭合标签（需要补开标签）
 	const fixPoints = [];      // [{ name, pos }] 需要补闭的位置
-	const seenTags = [];       // [{ name, pos, isClose }] 所有已匹配的标签位置
+	const seenTags = [];       // [{ name, pos, isClose, len }] 所有已匹配的标签位置
 
 	let m;
 	while ((m = tagRe.exec(body)) !== null) {
@@ -403,7 +403,7 @@ function fixTagsInText(text) {
 		const name = m[1];
 		const pos = m.index;
 		const isClose = full.startsWith('</');
-		seenTags.push({ name, pos, isClose });
+		seenTags.push({ name, pos, isClose, len: full.length });
 
 		if (isClose) {
 			// 闭合标签：从栈中找匹配的开标签并弹出
@@ -454,8 +454,17 @@ function fixTagsInText(text) {
 		}
 	}
 
-	// 补开标签（孤儿闭标签）：插入在最近子标签之前
+	// 补开标签（孤儿闭标签）：插入在最近子标签之前；叶子标签则插在父/同级之后
 	const orphanFixPoints = []; // [{ pos, name }]
+
+	// 辅助：nameA 是否是 nameB 的父或祖先
+	function isParentOrAncestor(a, b) {
+		const kids = children[a];
+		if (!kids) return false;
+		if (kids.has(b)) return true;
+		for (const k of kids) { if (isParentOrAncestor(k, b)) return true; }
+		return false;
+	}
 
 	for (const oc of orphanCloses) {
 		// 递归获取 oc.name 的所有子孙标签
@@ -466,13 +475,24 @@ function fixTagsInText(text) {
 			for (const k of kids) { descendants.add(k); collect(k); }
 		})(oc.name);
 
-		// 在 seenTags 中找出现在 oc.pos 之前的子孙标签，取最早位置
+		// 策略 A：找最早出现的子孙标签，插入在它前面
 		const childHits = seenTags.filter(t => !t.isClose && descendants.has(t.name) && t.pos < oc.pos);
-		const insertPos = childHits.length > 0
-			? Math.min(...childHits.map(t => t.pos))
-			: 0; // 没找到子标签 → 回退到开头
+		if (childHits.length > 0) {
+			orphanFixPoints.push({ pos: Math.min(...childHits.map(t => t.pos)), name: oc.name });
+			continue;
+		}
 
-		orphanFixPoints.push({ pos: insertPos, name: oc.name });
+		// 策略 B（叶子标签）：找最近的在 oc 之前的、是 oc 父级或同级的开标签，插在它后面
+		let anchorPos = 0;
+		for (let i = seenTags.length - 1; i >= 0; i--) {
+			const st = seenTags[i];
+			if (st.pos >= oc.pos || st.isClose) continue;
+			if (isParentOrAncestor(st.name, oc.name) || siblings.has(st.name) && siblings.has(oc.name)) {
+				anchorPos = st.pos + st.len;
+				break;
+			}
+		}
+		orphanFixPoints.push({ pos: anchorPos, name: oc.name });
 	}
 
 	// 从后往前一次性插入所有修复（闭标签 + 孤儿开标签）
