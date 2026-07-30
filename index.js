@@ -255,7 +255,8 @@ function scanAndFill() {
 		}
 	}
 
-	// 合并已有配置的标签树：保留用户已有的结构关系
+	// 合并已有配置的标签树：填补扫描未检测到的标签及其层级
+	// 规则：文本证据优先 → 只保留不与扫描结果冲突的已有关系
 	const existingLines = settings.tagTree.split('\n').filter(l => l.trim());
 	const indentStack = [];
 	for (const line of existingLines) {
@@ -273,7 +274,12 @@ function scanAndFill() {
 			if (!tagMeta[parent]) {
 				tagMeta[parent] = { firstPos: Infinity, children: new Set() };
 			}
-			tagMeta[parent].children.add(name);
+			// 检查：name 是否已被扫描分配给其他父标签？是则跳过（文本证据优先）
+			const alreadyChildOf = Object.entries(tagMeta)
+				.filter(([k, v]) => k !== parent && v.children?.has(name));
+			if (alreadyChildOf.length === 0) {
+				tagMeta[parent].children.add(name);
+			}
 		}
 		indentStack.push({ name, depth });
 	}
