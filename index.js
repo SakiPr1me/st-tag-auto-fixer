@@ -51,7 +51,7 @@ function parseTagTree() {
 
 // ========== 扫描消息、重建标签树 ==========
 
-function scanAndFill() {
+function scanAndFill(replaceMode = false) {
 	const ctx = getContext();
 	if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
 
@@ -268,29 +268,29 @@ function scanAndFill() {
 		}
 	}
 
-	// 合并已有配置的标签树：填补扫描未检测到的标签及其层级
-	// 规则：文本证据优先 → 只保留不与扫描结果冲突的已有关系
-	const existingLines = settings.tagTree.split('\n').filter(l => l.trim());
-	const indentStack = [];
-	for (const line of existingLines) {
-		const rawIndent = line.search(/\S/);
-		const name = line.trim();
-		const depth = rawIndent === 0 ? 0 : Math.max(1, Math.round(rawIndent / 2));
-		while (indentStack.length > 0 && indentStack[indentStack.length - 1].depth >= depth) {
-			indentStack.pop();
-		}
-		if (!tagMeta[name]) {
-			tagMeta[name] = { firstPos: Infinity, children: new Set() };
-		}
-		if (indentStack.length > 0 && tagMeta[name]?.firstPos === Infinity) {
-			// 只在 scan 未检测到时沿用已有树的层级关系（文本证据优先）
-			const parent = indentStack[indentStack.length - 1].name;
-			if (!tagMeta[parent]) {
-				tagMeta[parent] = { firstPos: Infinity, children: new Set() };
+	// 补充模式：合并已有配置的标签树（全量替换模式则跳过此步）
+	if (!replaceMode) {
+		const existingLines = settings.tagTree.split('\n').filter(l => l.trim());
+		const indentStack = [];
+		for (const line of existingLines) {
+			const rawIndent = line.search(/\S/);
+			const name = line.trim();
+			const depth = rawIndent === 0 ? 0 : Math.max(1, Math.round(rawIndent / 2));
+			while (indentStack.length > 0 && indentStack[indentStack.length - 1].depth >= depth) {
+				indentStack.pop();
 			}
-			tagMeta[parent].children.add(name);
+			if (!tagMeta[name]) {
+				tagMeta[name] = { firstPos: Infinity, children: new Set() };
+			}
+			if (indentStack.length > 0 && tagMeta[name]?.firstPos === Infinity) {
+				const parent = indentStack[indentStack.length - 1].name;
+				if (!tagMeta[parent]) {
+					tagMeta[parent] = { firstPos: Infinity, children: new Set() };
+				}
+				tagMeta[parent].children.add(name);
+			}
+			indentStack.push({ name, depth });
 		}
-		indentStack.push({ name, depth });
 	}
 
 	// 找去重后的根级标签
@@ -714,11 +714,11 @@ jQuery(async () => {
 
 <textarea id="${extensionName}_tree" class="text_pole" style="width:100%;height:220px;font-family:monospace">${settings.tagTree}</textarea>
 
-<div style="display:flex;gap:6px;margin-top:6px">
-<button id="${extensionName}_scan" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔍 扫描并重建标签树</button>
-<button id="${extensionName}_btn" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔧 修复最后一条消息</button>
-</div>
-	<button id="${extensionName}_reset" class="menu_button" style="width:100%;padding:4px;font-size:0.75em;margin-top:4px;opacity:0.5">↺ 重置为默认标签树</button>
+	<div style="display:flex;gap:6px;margin-top:6px">
+	<button id="${extensionName}_scan_replace" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔄 全量替换扫描</button>
+	<button id="${extensionName}_scan_append" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">📎 补充扫描</button>
+	</div>
+	<button id="${extensionName}_btn" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">🔧 修复最后一条消息</button>
 
 <p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
 也可用 <code>/fix-tags</code> 或点发送按钮旁 🏷️ 图标
@@ -735,7 +735,8 @@ jQuery(async () => {
 	});
 
 	// 绑定按钮
-	$(`#${extensionName}_scan`).on('click', scanAndFill);
+	$(`#${extensionName}_scan_replace`).on('click', () => scanAndFill(true));
+	$(`#${extensionName}_scan_append`).on('click', () => scanAndFill(false));
 	$(`#${extensionName}_btn`).on('click', async () => { await fixLastMessage(); });
 	$(`#${extensionName}_reset`).on('click', () => {
 		settings.tagTree = defaultTagTree;
