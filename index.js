@@ -450,47 +450,38 @@ async function fixLastMessage() {
 
 		console.log(`[TagAutoFixer] 修复了 ${result.fixed} 个标签`);
 
-		// Step 1: 直接修改消息数据
-		lastMsg.mes = result.text;
-
-		// Step 2: 保存到磁盘
-		if (ctx.saveChat) {
-			await ctx.saveChat();
-		} else {
-			// 回退：手动触发保存
-			console.warn('[TagAutoFixer] ctx.saveChat 不可用，尝试全局触发保存');
-			if (window.SillyTavern?.getContext()?.saveChat) {
-				await window.SillyTavern.getContext().saveChat();
-			}
-		}
-
-		// Step 3: 即时渲染 —— 让 Regex 美化接管
-		// setChatMessages({message_id}) 是 Slash Runner 注入的，只传 message_id 不传内容 = 纯刷新渲染
+		// setChatMessages 是 Slash Runner 注入到全局的函数，同时负责数据更新 + 保存 + 渲染
+		// 格式和双击编辑插件一样：先直接改 chat 数组，再调 setChatMessages
+		const scm = window.setChatMessages || ctx?.setChatMessages;
 		let rendered = false;
 
-		if (typeof ctx.setChatMessages === 'function') {
+		if (typeof scm === 'function') {
 			try {
-				await ctx.setChatMessages([{ message_id: lastIdx }]);
+				lastMsg.mes = result.text;
+				await scm([{ message_id: lastIdx, message: result.text }]);
 				rendered = true;
-				console.log('[TagAutoFixer] 通过 setChatMessages 触发消息渲染');
+				console.log('[TagAutoFixer] 通过 setChatMessages 触发渲染（Regex 美化应该已生效）');
 			} catch (e) {
 				console.warn('[TagAutoFixer] setChatMessages 失败:', e);
 			}
 		}
 
-		if (!rendered && ctx.eventSource && ctx.eventTypes?.CHAT_CHANGED) {
-			// 回退：完整聊天重载（会触发所有 Regex）
-			ctx.eventSource.emit(ctx.eventTypes.CHAT_CHANGED, ctx.chatId);
-			rendered = true;
-			console.log('[TagAutoFixer] 通过 CHAT_CHANGED 触发完整聊天重渲染');
+		if (!rendered) {
+			// 回退：手动保存 + CHAT_CHANGED 完整重载
+			lastMsg.mes = result.text;
+			if (ctx.saveChat) await ctx.saveChat();
+			if (ctx.eventSource && ctx.eventTypes?.CHAT_CHANGED) {
+				ctx.eventSource.emit(ctx.eventTypes.CHAT_CHANGED, ctx.chatId);
+				rendered = true;
+				console.log('[TagAutoFixer] 通过 CHAT_CHANGED 触发完整聊天重渲染');
+			}
 		}
 
 		if (!rendered) {
-			// 最后的回退：DOM 直接操作
+			// 最后回退：DOM 直接操作（Regex 美化不会触发）
 			const $mes = $(`#chat .mes[mesid="${lastIdx}"]`);
 			if ($mes.length > 0) {
-				const formatted = $('<div>').text(result.text).html().replace(/\n/g, '<br>');
-				$mes.find('.mes_text').html(`<p>${formatted}</p>`);
+				$mes.find('.mes_text').html(`<pre>${$('<div>').text(result.text).html()}</pre>`);
 				rendered = true;
 				console.log('[TagAutoFixer] 通过 DOM 直接刷新（Regex 美化可能未触发）');
 			}
