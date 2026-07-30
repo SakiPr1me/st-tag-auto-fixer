@@ -454,8 +454,9 @@ function fixTagsInText(text) {
 		}
 	}
 
-	// 补开标签（孤儿闭标签）：插入在最近子标签之前；叶子标签则插在父/同级之后
+	// 补开标签（孤儿闭标签）
 	const orphanFixPoints = []; // [{ pos, name }]
+	const virtualPositions = {}; // { name: pos } 祖先的锚点传给子孙
 
 	// 辅助：nameA 是否是 nameB 的父或祖先
 	function isParentOrAncestor(a, b) {
@@ -466,44 +467,84 @@ function fixTagsInText(text) {
 		return false;
 	}
 
-	for (const oc of orphanCloses) {
-		// 递归获取 oc.name 的所有子孙标签
-		const descendants = new Set();
+	// 收集全量子孙
+	function getDescendants(name) {
+		const result = new Set();
 		(function collect(n) {
 			const kids = children[n];
 			if (!kids) return;
-			for (const k of kids) { descendants.add(k); collect(k); }
-		})(oc.name);
+			for (const k of kids) { result.add(k); collect(k); }
+		})(name);
+		return result;
+	}
 
-		// 策略 A：找最早出现的子孙标签，插入在它前面
+	// 祖先优先排序：父标签先确定位置，子标签可以用它的虚拟锚点
+	orphanCloses.sort((a, b) => {
+		if (isParentOrAncestor(a.name, b.name)) return -1;
+		if (isParentOrAncestor(b.name, a.name)) return 1;
+		return 0;
+	});
+
+	for (const oc of orphanCloses) {
+		const descendants = getDescendants(oc.name);
+
+		// 策略 A：找最早出现的子孙开标签，插在它前面
 		const childHits = seenTags.filter(t => !t.isClose && descendants.has(t.name) && t.pos < oc.pos);
 		if (childHits.length > 0) {
-			orphanFixPoints.push({ pos: Math.min(...childHits.map(t => t.pos)), name: oc.name });
+			const pos = Math.min(...childHits.map(t => t.pos));
+			virtualPositions[oc.name] = pos;
+			orphanFixPoints.push({ pos, name: oc.name });
 			continue;
 		}
 
-		// 策略 B（叶子标签）：找最近的在 oc 之前的、是 oc 父级或同级的开标签，插在它后面
+		// 策略 B：找父/同级开标签锚点
 		let anchorPos = 0;
 		for (let i = seenTags.length - 1; i >= 0; i--) {
 			const st = seenTags[i];
 			if (st.pos >= oc.pos || st.isClose) continue;
-			if (isParentOrAncestor(st.name, oc.name) || siblings.has(st.name) && siblings.has(oc.name)) {
+			if (isParentOrAncestor(st.name, oc.name) || (siblings.has(st.name) && siblings.has(oc.name))) {
 				anchorPos = st.pos + st.len;
 				break;
 			}
 		}
+
+		// 策略 C：anchorPos 仍为 0 → 用祖先的虚拟锚点
+		if (anchorPos === 0) {
+			for (const [pName, pPos] of Object.entries(virtualPositions)) {
+				if (isParentOrAncestor(pName, oc.name) && pPos > anchorPos) {
+					anchorPos = pPos;
+				}
+			}
+		}
+
+		virtualPositions[oc.name] = anchorPos;
 		orphanFixPoints.push({ pos: anchorPos, name: oc.name });
+	}
+
+	// 同位置合并：祖先在前（外先内后），拼成一块插入
+	orphanFixPoints.sort((a, b) => {
+		if (a.pos !== b.pos) return a.pos - b.pos;
+		if (isParentOrAncestor(a.name, b.name)) return -1;
+		if (isParentOrAncestor(b.name, a.name)) return 1;
+		return 0;
+	});
+	const mergedOrphans = [];
+	for (const o of orphanFixPoints) {
+		const last = mergedOrphans[mergedOrphans.length - 1];
+		if (last && last.pos === o.pos) { last.names.push(o.name); }
+		else { mergedOrphans.push({ pos: o.pos, names: [o.name] }); }
 	}
 
 	// 从后往前一次性插入所有修复（闭标签 + 孤儿开标签）
 	const allInserts = [...grouped.map(g => ({ pos: g.pos, text: g.names.map(n => `</${n}>\n`).join('') })),
-		...orphanFixPoints.map(o => ({ pos: o.pos, text: `<${o.name}>\n` }))];
+		...mergedOrphans.map(o => ({ pos: o.pos, text: o.names.map(n => `<${n}>\n`).join('') }))];
 	allInserts.sort((a, b) => b.pos - a.pos);
 
 	for (const ins of allInserts) {
 		body = body.slice(0, ins.pos) + ins.text + body.slice(ins.pos);
 	}
-	fixed += grouped.reduce((s, g) => s + g.names.length, 0) + orphanFixPoints.length;
+	fixed += grouped.reduce((s, g) => s + g.names.length, 0)
+		+ mergedOrphans.reduce((s, o) => s + o.names.length, 0);
 
 	// 尾部补闭合标签（栈中剩余）
 	while (stack.length > 0) {
