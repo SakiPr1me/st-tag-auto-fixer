@@ -569,7 +569,7 @@ function fixTagsInText(text) {
 
 	// 从后往前一次性插入所有修复（闭标签 + 孤儿开标签）
 	const allInserts = [...grouped.map(g => ({ pos: g.pos, text: g.names.map(n => `</${n}>\n`).join('') })),
-		...mergedOrphans.map(o => ({ pos: o.pos, text: o.names.map(n => `<${n}>\n`).join('') }))];
+		...mergedOrphans.map(o => ({ pos: o.pos, text: (o.pos > 0 ? '\n' : '') + o.names.map(n => `<${n}>\n`).join('') }))];
 	allInserts.sort((a, b) => b.pos - a.pos);
 
 	for (const ins of allInserts) {
