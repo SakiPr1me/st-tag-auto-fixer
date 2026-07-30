@@ -478,6 +478,14 @@ function fixTagsInText(text) {
 		return result;
 	}
 
+	// 是否任意层级的兄弟（共享同一父标签）
+	function areSiblingsAnyLevel(a, b) {
+		for (const kids of Object.values(children)) {
+			if (kids.has(a) && kids.has(b)) return true;
+		}
+		return false;
+	}
+
 	// 祖先优先排序：父标签先确定位置，子标签可以用它的虚拟锚点
 	orphanCloses.sort((a, b) => {
 		if (isParentOrAncestor(a.name, b.name)) return -1;
@@ -498,14 +506,20 @@ function fixTagsInText(text) {
 		}
 
 		// 策略 B：找父/同级开标签锚点
+		// 父标签 → 插在它后面；同级标签 → 插在它前面
 		let anchorPos = 0;
 		for (let i = seenTags.length - 1; i >= 0; i--) {
 			const st = seenTags[i];
 			if (st.pos >= oc.pos || st.isClose) continue;
-			if (isParentOrAncestor(st.name, oc.name) || (siblings.has(st.name) && siblings.has(oc.name))) {
-				anchorPos = st.pos + st.len;
+			if (isParentOrAncestor(st.name, oc.name)) {
+				anchorPos = st.pos + st.len;  // 父标签：插在它开标签后面
 				break;
 			}
+			if (areSiblingsAnyLevel(st.name, oc.name)) {
+				anchorPos = st.pos;  // 同级标签：插在它前面
+				break;
+			}
+		}
 		}
 
 		// 策略 C：anchorPos 仍为 0 → 用祖先的虚拟锚点
