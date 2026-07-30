@@ -1,7 +1,7 @@
 {
     "display_name": "Tag Auto Fixer",
     "name": "Tag Auto Fixer",
-    "description": "/fix-tags 一键修复XML标签闭合。栈式算法，支持嵌套和同级标签。发送按钮旁也有图标入口。",
+    "description": "/fix-tags 一键修复XML标签闭合。栈式算法，自动识别嵌套，扫描全覆盖。",
     "version": "1.0.0",
     "author": "Local",
     "js": ["index.js"]
