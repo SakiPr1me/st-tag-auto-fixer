@@ -211,14 +211,8 @@ async function fixLastMessage() {
         return;
     }
 
-    lastMsg.mes = result.text;
+    await ctx.setChatMessages([{ message_id: lastIdx, message: result.text }]);
     await ctx.saveChat?.();
-
-    try {
-        SillyTavern.refreshChat();
-    } catch (_) {
-        window.location.reload();
-    }
 
     toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`);
 }
