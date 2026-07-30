@@ -695,7 +695,7 @@ jQuery(async () => {
 	function updateInlineBtn() {
 		$(`#${inlineBtnId}`).remove();
 		if (!settings.showInlineBtn) return;
-		const btnHtml = `<div id="${inlineBtnId}" class="fa-solid fa-tag interactable" title="修复标签" style="cursor:pointer;padding:0 4px;font-size:0.85em;opacity:0.55;margin-right:2px"></div>`;
+		const btnHtml = `<div id="${inlineBtnId}" class="fa-solid fa-tag interactable" title="修复标签" style="cursor:pointer;padding:0 3px;font-size:0.7em;opacity:0.5;margin-right:1px"></div>`;
 		const left = $('#leftSendForm'), right = $('#rightSendForm');
 		const target = left.length ? left : (right.length ? right : null);
 		if (target) {
@@ -801,7 +801,7 @@ jQuery(async () => {
 	<button id="${extensionName}_btn" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">🔧 修复最后一条消息</button>
 
 	<div style="margin-top:8px;font-size:0.8em;display:flex;gap:12px;align-items:center">
-	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_inline" ${settings.showInlineBtn ? 'checked' : ''}> 发送按钮旁</label>
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_inline" ${settings.showInlineBtn ? 'checked' : ''}> 输入框旁</label>
 	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_float" ${settings.showFloatingBtn ? 'checked' : ''}> 悬浮按钮</label>
 	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_menu" ${settings.showMenuBtn ? 'checked' : ''}> 扩展菜单</label>
 	</div>
