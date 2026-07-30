@@ -89,52 +89,108 @@ function scanAndFill() {
 
 	// ===== 关键修复：当 ranges 为空时的回退逻辑 =====
 	if (!ranges.length) {
-		// AI 可能掉了闭合标签，尝试从孤儿标签推断结构
+		// AI 可能掉了闭合标签。从 allTags 直接检测嵌套关系。
 		const uniqueNames = [...new Set(allTags.map(t => t.name))];
-		console.log('[TagAutoFixer] 未找到完整闭合对，尝试从孤儿标签推断。检测到的标签:', uniqueNames);
+		console.log('[TagAutoFixer] 未找到完整闭合对，从孤儿标签推断。检测到的标签:', uniqueNames);
 
-		// 统计每种标签的出现次数（开标签次数）
-		const openCounts = {};
+		// 检测 enclosure：即使没有完整闭合对，也能通过栈匹配找到大多数区间
+		const enclosureMap = {}; // { name: Set of enclosed tag names }
+		for (const name of uniqueNames) enclosureMap[name] = new Set();
+
+		const tempStack = []; // [{ name, startPos }]
+		const tempPairs = []; // [{ name, start, end }]
+
 		for (const t of allTags) {
 			if (!t.isClose) {
-				openCounts[t.name] = (openCounts[t.name] || 0) + 1;
+				tempStack.push({ name: t.name, startPos: t.pos });
+			} else {
+				for (let i = tempStack.length - 1; i >= 0; i--) {
+					if (tempStack[i].name === t.name) {
+						tempPairs.push({ name: t.name, start: tempStack[i].startPos, end: t.pos });
+						// 检查这个区间内包含的其他标签名
+						for (const other of allTags) {
+							if (other.name !== t.name && other.pos > tempStack[i].startPos && other.pos < t.pos) {
+								enclosureMap[t.name].add(other.name);
+							}
+						}
+						tempStack.splice(i, 1);
+						break;
+					}
+				}
 			}
 		}
 
-		// 推论：出现 2 次以上的大概率是结构标签；只出现 1 次的也可能是嵌套子标签
-		// 简化策略：把所有检测到的标签都列出来，按出现次数排序
-		const candidates = uniqueNames
-			.map(name => ({ name, count: (openCounts[name] || 0) + ((tagCount[name] || 0) - (openCounts[name] || 0)) }))
-			.sort((a, b) => b.count - a.count);
-
-		// 从已有配置中读取 known tags，新标签追加
-		const { allTags: knownTags, siblings: knownSiblings } = parseTagTree();
-		const knownSet = new Set(knownTags);
-
-		const newTree = [];
-		// 保留已有的顶级标签
-		for (const name of knownSiblings) {
-			if (candidates.some(c => c.name === name)) {
-				newTree.push(name);
-				knownSet.delete(name);
-			}
-		}
-		// 推测新标签为顶级标签（用户后续可以手动调整缩进）
-		for (const c of candidates) {
-			if (!knownSet.has(c.name) && !newTree.includes(c.name)) {
-				newTree.push(c.name);
+		// 孤儿标签（栈中剩余）：它们可能也包含其他标签
+		for (const orphan of tempStack) {
+			for (const other of allTags) {
+				if (other.name !== orphan.name && other.pos > orphan.startPos) {
+					enclosureMap[orphan.name].add(other.name);
+				}
 			}
 		}
 
-		if (!newTree.length) {
+		// 内联标签判定：出现 >= 2 个闭合对 且 不包含任何其他标签 → 过滤
+		const isStructural = {};
+		for (const name of uniqueNames) {
+			const pairCount = (tagCount[name] || 0) / 2;
+			const hasEnclosure = enclosureMap[name] && enclosureMap[name].size > 0;
+			isStructural[name] = hasEnclosure || pairCount <= 1;
+		}
+
+		// 去除内联标签后重建 enclosure（内联被过滤后，它们的父标签可能也失去 child）
+		const structuralNames = uniqueNames.filter(n => isStructural[n]);
+		const cleanEnclosure = {};
+		for (const name of structuralNames) {
+			cleanEnclosure[name] = new Set();
+			if (enclosureMap[name]) {
+				for (const c of enclosureMap[name]) {
+					if (isStructural[c] && c !== name) cleanEnclosure[name].add(c);
+				}
+			}
+		}
+
+		// 找根级标签（不被任何其他结构标签包含的）
+		const allChildren = new Set();
+		for (const [name, children] of Object.entries(cleanEnclosure)) {
+			for (const c of children) allChildren.add(c);
+		}
+		const roots = structuralNames.filter(n => !allChildren.has(n));
+		// 如果所有都是子标签（嵌套极深），全部作为根级
+		if (!roots.length) roots.push(...structuralNames);
+
+		// 按首次出现位置排序
+		const firstPosMap = {};
+		for (const t of allTags) {
+			if (!t.isClose && structuralNames.includes(t.name) && !(t.name in firstPosMap)) {
+				firstPosMap[t.name] = t.pos;
+			}
+		}
+		roots.sort((a, b) => (firstPosMap[a] || 0) - (firstPosMap[b] || 0));
+
+		// 构建缩进树
+		const fallbackTree = [];
+		const vb = new Set(); // visited
+		function walk(name, depth) {
+			if (vb.has(name)) return;
+			vb.add(name);
+			const prefix = '  '.repeat(depth);
+			fallbackTree.push(prefix + name);
+			const kids = [...(cleanEnclosure[name] || [])].filter(c => !vb.has(c));
+			kids.sort((a, b) => (firstPosMap[a] || 0) - (firstPosMap[b] || 0));
+			for (const kid of kids) walk(kid, depth + 1);
+		}
+		for (const r of roots) walk(r, 0);
+
+		if (!fallbackTree.length) {
 			toastr?.info?.('扫描完成但未能推断标签层级。请手动调整缩进。');
 			return;
 		}
 
-		settings.tagTree = newTree.join('\n');
+		const inlineCount = uniqueNames.length - structuralNames.length;
+		settings.tagTree = fallbackTree.join('\n');
 		$(`#${extensionName}_tree`).val(settings.tagTree);
 		saveSettingsDebounced();
-		toastr?.success?.(`✅ 标签树已重建（${newTree.length} 个标签，从孤儿标签推断）`);
+		toastr?.success?.(`✅ 标签树已重建（${structuralNames.length} 个结构标签，${inlineCount} 个内联标签已过滤）`);
 		return;
 	}
 
