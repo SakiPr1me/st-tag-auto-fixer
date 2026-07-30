@@ -21,7 +21,6 @@ if (!extension_settings[extensionName]) extension_settings[extensionName] = defa
 const settings = extension_settings[extensionName];
 if (!settings.tagTree) settings.tagTree = defaultTagTree;
 
-// ====== 解析缩进树 → { allTags, siblings } ======
 function parseTagTree() {
     const lines = settings.tagTree.split('\n').filter(l => l.trim());
     const allTags = new Set();
@@ -35,7 +34,6 @@ function parseTagTree() {
     return { allTags: [...allTags], siblings };
 }
 
-// ====== 扫描并自动生成标签树（全覆盖） ======
 function scanAndFill() {
     const ctx = getContext();
     if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
@@ -129,7 +127,6 @@ function scanAndFill() {
     toastr?.success?.(`✅ 标签树已重建（${kept.size} 个结构标签，${totalNames.size - kept.size} 个内联标签已过滤）`);
 }
 
-// ====== 修复标签文本 ======
 function fixTagsInText(text) {
     const { allTags: tags, siblings } = parseTagTree();
     if (!tags.length) return { text, fixed: 0 };
@@ -190,53 +187,42 @@ function fixTagsInText(text) {
     return { text: body, fixed };
 }
 
-// ====== 酒馆上下文 ======
 function getContext() {
     try { if (window.top?.SillyTavern?.getContext) return window.top.SillyTavern.getContext(); } catch (_) {}
     try { if (window.SillyTavern?.getContext) return window.SillyTavern.getContext(); } catch (_) {}
     return null;
 }
 
-// ====== 主修复函数 ======
 async function fixLastMessage() {
     const ctx = getContext();
-    if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息') || alert('没有聊天消息'); return ''; }
+    if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
 
     let lastIdx = -1;
     for (let i = ctx.chat.length - 1; i >= 0; i--) {
         if (!ctx.chat[i].is_user) { lastIdx = i; break; }
     }
-    if (lastIdx < 0) { toastr?.warning?.('未找到AI消息') || alert('未找到AI消息'); return ''; }
+    if (lastIdx < 0) { toastr?.warning?.('未找到AI消息'); return; }
 
     const lastMsg = ctx.chat[lastIdx];
     const result = fixTagsInText(lastMsg.mes);
 
     if (result.fixed === 0) {
-        toastr?.success?.('✅ 所有标签均已正确闭合') || alert('✅ 所有标签均已正确闭合');
-        return '';
+        toastr?.success?.('✅ 所有标签均已正确闭合');
+        return;
     }
 
-    window.SillyTavern.chat[lastIdx].mes = result.text;
-
-    try { await ctx.saveChat?.(); } catch (_) {}
+    lastMsg.mes = result.text;
+    await ctx.saveChat?.();
 
     try {
-        if (window.setChatMessages) {
-            window.setChatMessages([{ message_id: lastIdx, message: result.text }]);
-        } else if (window.SillyTavern?.setChatMessages) {
-            window.SillyTavern.setChatMessages([{ message_id: lastIdx, message: result.text }]);
-        } else {
-            window.SillyTavern?.refreshChat?.();
-        }
+        SillyTavern.refreshChat();
     } catch (_) {
         window.location.reload();
     }
 
-    toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`) || alert(`✅ 已修复 ${result.fixed} 个标签`);
-    return '';
+    toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`);
 }
 
-// ====== 入口注册 ======
 jQuery(async () => {
     const ctx = getContext();
 
@@ -244,7 +230,7 @@ jQuery(async () => {
         try {
             ctx.SlashCommandParser.addCommand('fix-tags', fixLastMessage,
                 ['fix-tags', '修复标签'],
-                '自动修复AI输出中缺失的标签闭合（栈式算法）', true, true);
+                '自动修复AI输出中缺失的标签闭合', true, true);
         } catch (_) {}
     }
 
