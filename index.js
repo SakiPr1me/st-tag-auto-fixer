@@ -520,7 +520,6 @@ function fixTagsInText(text) {
 				break;
 			}
 		}
-		}
 
 		// 策略 C：anchorPos 仍为 0 → 用祖先的虚拟锚点
 		if (anchorPos === 0) {
