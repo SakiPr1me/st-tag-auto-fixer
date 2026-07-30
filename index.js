@@ -241,6 +241,43 @@ function scanAndFill() {
 		}
 	}
 
+	// 保留孤儿开标签（掉了闭合的标签）：它们可能是一级父标签
+	for (const orphan of openStack) {
+		if (!tagMeta[orphan.name]) {
+			tagMeta[orphan.name] = { firstPos: orphan.start, children: new Set() };
+		} else if (orphan.start < tagMeta[orphan.name].firstPos) {
+			tagMeta[orphan.name].firstPos = orphan.start;
+		}
+		for (const r of ranges) {
+			if (kept.has(r.name) && r.name !== orphan.name && r.start > orphan.start) {
+				tagMeta[orphan.name].children.add(r.name);
+			}
+		}
+	}
+
+	// 合并已有配置的标签树：保留用户已有的结构关系
+	const existingLines = settings.tagTree.split('\n').filter(l => l.trim());
+	const indentStack = [];
+	for (const line of existingLines) {
+		const rawIndent = line.search(/\S/);
+		const name = line.trim();
+		const depth = rawIndent === 0 ? 0 : Math.max(1, Math.round(rawIndent / 2));
+		while (indentStack.length > 0 && indentStack[indentStack.length - 1].depth >= depth) {
+			indentStack.pop();
+		}
+		if (!tagMeta[name]) {
+			tagMeta[name] = { firstPos: Infinity, children: new Set() };
+		}
+		if (indentStack.length > 0) {
+			const parent = indentStack[indentStack.length - 1].name;
+			if (!tagMeta[parent]) {
+				tagMeta[parent] = { firstPos: Infinity, children: new Set() };
+			}
+			tagMeta[parent].children.add(name);
+		}
+		indentStack.push({ name, depth });
+	}
+
 	// 找去重后的根级标签
 	const allChildNamesDedup = new Set();
 	for (const [name, meta] of Object.entries(tagMeta)) {
@@ -248,12 +285,11 @@ function scanAndFill() {
 	}
 	const rootNames = Object.keys(tagMeta).filter(n => !allChildNamesDedup.has(n));
 	if (!rootNames.length) {
-		// 回退：所有标签都是根级
 		rootNames.push(...Object.keys(tagMeta));
 	}
 
-	// 按最早出现位置排序
-	rootNames.sort((a, b) => (tagMeta[a]?.firstPos || 0) - (tagMeta[b]?.firstPos || 0));
+	// 按最早出现位置排序（已有标签在 Infinity，排最后）
+	rootNames.sort((a, b) => (tagMeta[a]?.firstPos || 1e9) - (tagMeta[b]?.firstPos || 1e9));
 
 	// 构建缩进树（递归，visited 防止循环）
 	const builtTree = [];
@@ -519,6 +555,7 @@ jQuery(async () => {
 <button id="${extensionName}_scan" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔍 扫描并重建标签树</button>
 <button id="${extensionName}_btn" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔧 修复最后一条消息</button>
 </div>
+	<button id="${extensionName}_reset" class="menu_button" style="width:100%;padding:4px;font-size:0.75em;margin-top:4px;opacity:0.5">↺ 重置为默认标签树</button>
 
 <p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
 也可用 <code>/fix-tags</code> 或点发送按钮旁 🏷️ 图标
@@ -537,4 +574,10 @@ jQuery(async () => {
 	// 绑定按钮
 	$(`#${extensionName}_scan`).on('click', scanAndFill);
 	$(`#${extensionName}_btn`).on('click', async () => { await fixLastMessage(); });
+	$(`#${extensionName}_reset`).on('click', () => {
+		settings.tagTree = defaultTagTree;
+		$(`#${extensionName}_tree`).val(defaultTagTree);
+		saveSettingsDebounced();
+		toastr?.success?.('✅ 已重置为默认标签树');
+	});
 });
