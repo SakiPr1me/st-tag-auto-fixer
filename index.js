@@ -14,7 +14,6 @@ Events
 summary
 extra
 NG_scene
-NG_scene_guide
 lts`;
 
 const defaultSettings = { tagTree: defaultTagTree };
@@ -22,7 +21,7 @@ if (!extension_settings[extensionName]) extension_settings[extensionName] = defa
 const settings = extension_settings[extensionName];
 if (!settings.tagTree) settings.tagTree = defaultTagTree;
 
-// ====== 解析缩进树 ======
+// ====== 解析缩进树 → { allTags, siblings } ======
 function parseTagTree() {
     const lines = settings.tagTree.split('\n').filter(l => l.trim());
     const allTags = new Set();
@@ -36,7 +35,7 @@ function parseTagTree() {
     return { allTags: [...allTags], siblings };
 }
 
-// ====== 扫描当前消息中的标签 ======
+// ====== 扫描并自动生成标签树 ======
 function scanAndFill() {
     const ctx = getContext();
     if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
@@ -47,40 +46,115 @@ function scanAndFill() {
     }
     if (!lastMsg) { toastr?.warning?.('未找到AI消息'); return; }
 
-    // 砍掉 HTML / XML Schema 块，避免误扫
+    // 砍掉已知噪音块
     let clean = lastMsg.mes.replace(/<!DOCTYPE[\s\S]*?<\/html>/gi, '');
     clean = clean.replace(/<xs:schema[\s\S]*?<\/xs:schema>/gi, '');
     clean = clean.replace(/<dream_plot[\s\S]*?<\/dream_plot>/gi, '');
     clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
     clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
-    const tagPattern = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*>/g;
-    const found = new Set();
-    const noise = /^(html|head|body|meta|link|script|style|div|span|p|br|hr|img|a|h[1-6]|ul|ol|li|table|tr|td|th|input|button|form|label|select|option|textarea|iframe|svg|path|circle|rect|g|title|DOCTYPE|xml|xs:[a-z]+|dream_plot|dream_body|dream_after_format|story_plot|think|story_body|story_after_format|output_format)$/i;
+    const tagRe = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*>/g;
+    const allTags = []; // [{ name, isClose, pos }]
+    const tagCount = {};
 
     let m;
-    while ((m = tagPattern.exec(clean)) !== null) {
-        if (!noise.test(m[1])) found.add(m[1]);
+    while ((m = tagRe.exec(clean)) !== null) {
+        const name = m[1];
+        allTags.push({ name, isClose: m[0].startsWith('</'), pos: m.index });
+        tagCount[name] = (tagCount[name] || 0) + 1;
     }
 
-    if (found.size === 0) { toastr?.info?.('未检测到任何自定义标签'); return; }
+    if (!allTags.length) { toastr?.info?.('未检测到任何标签'); return; }
 
-    const existingNames = new Set(
-        settings.tagTree.trim().split('\n').filter(l => l.trim()).map(l => l.trim())
-    );
+    // 第1步：构建开闭区间
+    const ranges = [];
+    const openStack = [];
 
-    let added = 0;
-    for (const tag of found) {
-        if (!existingNames.has(tag)) {
-            settings.tagTree += '\n' + tag;
-            added++;
+    for (const t of allTags) {
+        if (!t.isClose) {
+            openStack.push({ name: t.name, start: t.pos });
+        } else {
+            for (let i = openStack.length - 1; i >= 0; i--) {
+                if (openStack[i].name === t.name) {
+                    ranges.push({
+                        name: t.name,
+                        start: openStack[i].start,
+                        end: t.pos,
+                        children: new Set()
+                    });
+                    openStack.splice(i, 1);
+                    break;
+                }
+            }
         }
     }
 
-    if (added === 0) { toastr?.info?.('没有发现新标签'); return; }
+    if (!ranges.length) { toastr?.info?.('未检测到任何闭合标签对'); return; }
+
+    // 第2步：推断父子关系（B 在 A 里面 → B 是 A 的子标签）
+    for (const parent of ranges) {
+        for (const child of ranges) {
+            if (child.name !== parent.name &&
+                child.start > parent.start && child.end < parent.end) {
+                parent.children.add(child.name);
+            }
+        }
+    }
+
+    // 第3步：判定结构标签 vs 内联标签
+    // 规则：有子标签 → 结构；开标签只出现1次 → 结构；其余 → 内联
+    const hasChildren = new Set();
+    for (const r of ranges) {
+        if (r.children.size > 0) hasChildren.add(r.name);
+    }
+
+    const kept = new Set();
+    for (const r of ranges) {
+        const count = tagCount[r.name] / 2; // 开+闭各算一次，/2 = 标签对数
+        if (hasChildren.has(r.name) || count <= 1) {
+            kept.add(r.name);
+        }
+    }
+
+    // 第4步：找根级标签（不被任何其他 kept 标签包含的）
+    const allChildNames = new Set();
+    for (const r of ranges) {
+        if (kept.has(r.name)) {
+            for (const c of r.children) {
+                if (kept.has(c)) allChildNames.add(c);
+            }
+        }
+    }
+
+    const rootCandidates = ranges.filter(r => kept.has(r.name) && !allChildNames.has(r.name));
+
+    // 第5步：递归构建缩进树
+    const builtTree = [];
+
+    function addBranch(tag, depth) {
+        const prefix = '  '.repeat(depth);
+        builtTree.push(prefix + tag.name);
+        for (const childName of tag.children) {
+            if (!kept.has(childName)) continue;
+            const childRange = ranges.find(r => r.name === childName);
+            if (childRange) addBranch(childRange, depth + 1);
+        }
+    }
+
+    for (const root of rootCandidates) {
+        addBranch(root, 0);
+    }
+
+    if (!builtTree.length) { toastr?.info?.('无法推断标签结构'); return; }
+
+    const newTree = builtTree.join('\n');
+    settings.tagTree = newTree;
+
     $(`#${extensionName}_tree`).val(settings.tagTree);
     saveSettingsDebounced();
-    toastr?.success?.(`已添加 ${added} 个新标签（平级），请手动调整缩进`);
+
+    const totalNames = new Set(ranges.map(r => r.name));
+    toastr?.success?.(`✅ 标签树已更新（${kept.size} 个结构标签，${totalNames.size - kept.size} 个内联标签已过滤）`);
 }
 
 // ====== 修复标签 ======
@@ -109,6 +183,7 @@ function fixTagsInText(text) {
             if (found >= 0) stack.splice(found, 1);
             else orphanCloses.push(name);
         } else {
+            // 同级标签：遇到新的同级，自动关掉上一个未闭合的同级
             if (siblings.has(name)) {
                 for (let i = stack.length - 1; i >= 0; i--) {
                     if (siblings.has(stack[i].name) && stack[i].name !== name) {
@@ -172,11 +247,9 @@ function fixLastMessage() {
 
     lastMsg.mes = result.text;
 
-    // 保存
     try { ctx.saveChat?.(); } catch (_) {}
     try { ctx.forceSaveChat?.(); } catch (_) {}
 
-    // 刷新渲染（走美化 Regex 链路，不需要刷页面）
     try {
         if (ctx.reloadMessage) {
             ctx.reloadMessage(lastIdx);
@@ -195,7 +268,7 @@ function fixLastMessage() {
 
 // ====== 入口注册 ======
 jQuery(() => {
-    // 入口1：斜杠命令
+    // 入口1：斜杠命令 /fix-tags
     const ctx = getContext();
     if (ctx?.SlashCommandParser) {
         try {
@@ -223,14 +296,14 @@ jQuery(() => {
 <div class="inline-drawer-content" style="display:none">
 
 <p style="font-size:0.8em;color:var(--grey_color);margin-bottom:6px">
-📌 缩进表示嵌套。不缩进的互为<b>同级</b>（遇到新同级自动闭合）。缩进的是父标签的<b>子标签</b>。
+📌 缩进 = 嵌套。不缩进的互为<b>同级</b>（遇到新同级自动闭合旧同级）。
 </p>
 
-<textarea id="${extensionName}_tree" class="text_pole" style="width:100%;height:200px;font-family:monospace">${settings.tagTree}</textarea>
+<textarea id="${extensionName}_tree" class="text_pole" style="width:100%;height:220px;font-family:monospace">${settings.tagTree}</textarea>
 
 <div style="display:flex;gap:6px;margin-top:6px">
-<button id="${extensionName}_scan" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔍 扫描当前标签</button>
-<button id="${extensionName}_btn" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔧 修复标签</button>
+<button id="${extensionName}_scan" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔍 扫描并自动生成标签树</button>
+<button id="${extensionName}_btn" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔧 修复最后一条消息</button>
 </div>
 
 <p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
