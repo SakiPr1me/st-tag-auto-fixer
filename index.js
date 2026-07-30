@@ -16,12 +16,13 @@ summary
 extra
 NG_scene`;
 
-const defaultSettings = { tagTree: defaultTagTree, showInlineBtn: true, showFloatingBtn: false };
+const defaultSettings = { tagTree: defaultTagTree, showInlineBtn: true, showFloatingBtn: false, showMenuBtn: true };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
 if (!settings.tagTree) settings.tagTree = defaultTagTree;
 if (settings.showInlineBtn === undefined) settings.showInlineBtn = true;
 if (settings.showFloatingBtn === undefined) settings.showFloatingBtn = false;
+if (settings.showMenuBtn === undefined) settings.showMenuBtn = true;
 
 // ========== 解析标签树（缩进 → 嵌套层级）==========
 
@@ -704,21 +705,77 @@ jQuery(async () => {
 	}
 	updateInlineBtn();
 
-	// 悬浮按钮
+	// 悬浮按钮（可拖拽）
 	const floatBtnId = `${extensionName}_float_btn`;
 	function updateFloatingBtn() {
 		$(`#${floatBtnId}`).remove();
 		if (!settings.showFloatingBtn) return;
-		$('body').append(`<div id="${floatBtnId}" title="修复标签" style="
+		$('body').append(`<div id="${floatBtnId}" title="修复标签（可拖拽）" style="
 			position:fixed;bottom:80px;right:20px;z-index:9999;
 			width:36px;height:36px;border-radius:50%;background:var(--accent-color, #888);
 			color:#fff;display:flex;align-items:center;justify-content:center;
-			cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);font-size:14px;
-			opacity:0.7;transition:opacity 0.2s;
-		" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.7'">🏷️</div>`);
-		$(`#${floatBtnId}`).on('click', async () => { await fixLastMessage(); });
+			cursor:grab;box-shadow:0 2px 8px rgba(0,0,0,0.3);font-size:14px;
+			opacity:0.7;user-select:none;
+		">🏷️</div>`);
+
+		const $btn = $(`#${floatBtnId}`);
+		let dragging = false, dx = 0, dy = 0, startX, startY;
+
+		$btn.on('mousedown touchstart', function(e) {
+			dragging = false;
+			const ev = e.touches ? e.touches[0] : e;
+			startX = ev.clientX;
+			startY = ev.clientY;
+			const pos = $btn.position();
+			dx = startX - pos.left;
+			dy = startY - pos.top;
+			$btn.css({ cursor: 'grabbing', opacity: '1', transition: 'none' });
+		});
+
+		$(document).on('mousemove touchmove', function(e) {
+			if (!$btn[0] || dx === undefined) return;
+			const ev = e.touches ? e.touches[0] : e;
+			if (Math.abs(ev.clientX - startX) > 3 || Math.abs(ev.clientY - startY) > 3) {
+				dragging = true;
+			}
+			if (dragging) {
+				e.preventDefault();
+				$btn.css({ left: (ev.clientX - dx) + 'px', top: (ev.clientY - dy) + 'px', right: 'auto', bottom: 'auto' });
+			}
+		});
+
+		$(document).on('mouseup touchend', function() {
+			if ($btn[0]) {
+				$btn.css({ cursor: 'grab', opacity: '0.7', transition: 'opacity 0.2s' });
+			}
+			dx = undefined;
+		});
+
+		$btn.on('click', async function() {
+			if (!dragging) await fixLastMessage();
+		});
 	}
 	updateFloatingBtn();
+
+	// 扩展菜单项（#extensionsMenu 内）
+	const menuItemId = `${extensionName}_menu_item`;
+	function updateMenuItem() {
+		$(`#${menuItemId}`).remove();
+		if (!settings.showMenuBtn) return;
+		const $menu = $('#extensionsMenu');
+		if (!$menu.length) return;
+		$menu.append(`<a id="${menuItemId}" class="list-group-item" href="#" title="修复标签">
+			<i class="fa-solid fa-tag"></i> 修复标签
+		</a>`);
+		$(`#${menuItemId}`).on('click', async (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			$('#extensionsMenu').fadeOut(200);
+			await fixLastMessage();
+		});
+	}
+	// 延迟注入等菜单就绪
+	setTimeout(updateMenuItem, 1000);
 
 	// 注入设置面板
 	const h = `
@@ -744,8 +801,9 @@ jQuery(async () => {
 	<button id="${extensionName}_btn" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">🔧 修复最后一条消息</button>
 
 	<div style="margin-top:8px;font-size:0.8em;display:flex;gap:12px;align-items:center">
-	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_inline" ${settings.showInlineBtn ? 'checked' : ''}> 发送按钮旁图标</label>
-	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_float" ${settings.showFloatingBtn ? 'checked' : ''}> 右下悬浮按钮</label>
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_inline" ${settings.showInlineBtn ? 'checked' : ''}> 发送按钮旁</label>
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_float" ${settings.showFloatingBtn ? 'checked' : ''}> 悬浮按钮</label>
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_menu" ${settings.showMenuBtn ? 'checked' : ''}> 扩展菜单</label>
 	</div>
 
 <p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
@@ -783,5 +841,10 @@ jQuery(async () => {
 		settings.showFloatingBtn = this.checked;
 		saveSettingsDebounced();
 		updateFloatingBtn();
+	});
+	$(`#${extensionName}_chk_menu`).on('change', function() {
+		settings.showMenuBtn = this.checked;
+		saveSettingsDebounced();
+		updateMenuItem();
 	});
 });
