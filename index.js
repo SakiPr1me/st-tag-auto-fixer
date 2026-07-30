@@ -269,17 +269,13 @@ function scanAndFill() {
 		if (!tagMeta[name]) {
 			tagMeta[name] = { firstPos: Infinity, children: new Set() };
 		}
-		if (indentStack.length > 0) {
+		if (indentStack.length > 0 && tagMeta[name]?.firstPos === Infinity) {
+			// 只在 scan 未检测到时沿用已有树的层级关系（文本证据优先）
 			const parent = indentStack[indentStack.length - 1].name;
 			if (!tagMeta[parent]) {
 				tagMeta[parent] = { firstPos: Infinity, children: new Set() };
 			}
-			// 检查：name 是否已被扫描分配给其他父标签？是则跳过（文本证据优先）
-			const alreadyChildOf = Object.entries(tagMeta)
-				.filter(([k, v]) => k !== parent && v.children?.has(name));
-			if (alreadyChildOf.length === 0) {
-				tagMeta[parent].children.add(name);
-			}
+			tagMeta[parent].children.add(name);
 		}
 		indentStack.push({ name, depth });
 	}
