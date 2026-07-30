@@ -78,7 +78,11 @@ function scanAndFill() {
             }
         }
     }
-    if (!ranges.length) { toastr?.info?.('未检测到任何闭合标签对'); return; }
+
+    if (!ranges.length) {
+        toastr?.info?.(`检测到 ${new Set(allTags.map(t => t.name)).size} 种标签，但未找到任何完整闭合对。请确保标签均已闭合后重试。`);
+        return;
+    }
 
     for (const parent of ranges) {
         for (const child of ranges) {
@@ -102,7 +106,13 @@ function scanAndFill() {
             for (const c of r.children) { if (kept.has(c)) allChildNames.add(c); }
         }
     }
-    const rootCandidates = ranges.filter(r => kept.has(r.name) && !allChildNames.has(r.name));
+    let rootCandidates = ranges.filter(r => kept.has(r.name) && !allChildNames.has(r.name));
+
+    // 回退：如果过滤后根级为空，保留所有标签不做过滤
+    if (!rootCandidates.length) {
+        rootCandidates = ranges.filter(r => !allChildNames.has(r.name));
+        for (const r of rootCandidates) kept.add(r.name);
+    }
 
     const builtTree = [];
     function addBranch(tag, depth) {
@@ -116,7 +126,10 @@ function scanAndFill() {
     }
     for (const root of rootCandidates) { addBranch(root, 0); }
 
-    if (!builtTree.length) { toastr?.info?.('无法推断标签结构'); return; }
+    if (!builtTree.length) {
+        toastr?.info?.('扫描完成但未能推断标签层级。请手动调整缩进。');
+        return;
+    }
 
     const newTree = builtTree.join('\n');
     settings.tagTree = newTree;
@@ -194,27 +207,32 @@ function getContext() {
 }
 
 async function fixLastMessage() {
-    const ctx = getContext();
-    if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
+    try {
+        const ctx = getContext();
+        if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
 
-    let lastIdx = -1;
-    for (let i = ctx.chat.length - 1; i >= 0; i--) {
-        if (!ctx.chat[i].is_user) { lastIdx = i; break; }
+        let lastIdx = -1;
+        for (let i = ctx.chat.length - 1; i >= 0; i--) {
+            if (!ctx.chat[i].is_user) { lastIdx = i; break; }
+        }
+        if (lastIdx < 0) { toastr?.warning?.('未找到AI消息'); return; }
+
+        const lastMsg = ctx.chat[lastIdx];
+        const result = fixTagsInText(lastMsg.mes);
+
+        if (result.fixed === 0) {
+            toastr?.success?.('✅ 所有标签均已正确闭合');
+            return;
+        }
+
+        await ctx.setChatMessages([{ message_id: lastIdx, message: result.text }]);
+        await ctx.saveChat?.();
+
+        toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`);
+    } catch (e) {
+        console.error('[TagAutoFixer]', e);
+        toastr?.error?.('修复失败，请查看控制台');
     }
-    if (lastIdx < 0) { toastr?.warning?.('未找到AI消息'); return; }
-
-    const lastMsg = ctx.chat[lastIdx];
-    const result = fixTagsInText(lastMsg.mes);
-
-    if (result.fixed === 0) {
-        toastr?.success?.('✅ 所有标签均已正确闭合');
-        return;
-    }
-
-    await ctx.setChatMessages([{ message_id: lastIdx, message: result.text }]);
-    await ctx.saveChat?.();
-
-    toastr?.success?.(`✅ 已修复 ${result.fixed} 个标签`);
 }
 
 jQuery(async () => {
