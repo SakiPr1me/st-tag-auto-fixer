@@ -1,8 +1,10 @@
 {
     "display_name": "Tag Auto Fixer",
-    "name": "Tag Auto Fixer",
-    "description": "/fix-tags 一键修复XML标签闭合。栈式算法，自动识别嵌套，扫描全覆盖。",
+    "loading_order": 0,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "SakiPr1me",
     "version": "1.0.0",
-    "author": "Local",
-    "js": ["index.js"]
+    "description": "一键修复AI输出中缺失的XML标签闭合"
 }
