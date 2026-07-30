@@ -27,13 +27,26 @@ function parseTagTree() {
 	const lines = settings.tagTree.split('\n').filter(l => l.trim());
 	const allTags = new Set();
 	const siblings = new Set();
+	const children = {}; // { parentName: Set of childNames }
+
+	const stack = [];
 	for (const line of lines) {
-		const indent = line.search(/\S/);
+		const rawIndent = line.search(/\S/);
 		const name = line.trim();
 		allTags.add(name);
-		if (indent === 0) siblings.add(name);
+		if (rawIndent === 0) siblings.add(name);
+
+		const depth = rawIndent === 0 ? 0 : Math.max(1, Math.round(rawIndent / 2));
+		while (stack.length > 0 && stack[stack.length - 1].depth >= depth) stack.pop();
+		if (stack.length > 0) {
+			const parent = stack[stack.length - 1].name;
+			if (!children[parent]) children[parent] = new Set();
+			children[parent].add(name);
+		}
+		stack.push({ name, depth });
 	}
-	return { allTags: [...allTags], siblings };
+
+	return { allTags: [...allTags], siblings, children };
 }
 
 // ========== 扫描消息、重建标签树 ==========
@@ -331,7 +344,7 @@ function scanAndFill() {
 // ========== 栈式算法修复标签（同级互斥、补开补闭 + 残缺标签补全）==========
 
 function fixTagsInText(text) {
-	const { allTags: tags, siblings } = parseTagTree();
+	const { allTags: tags, siblings, children } = parseTagTree();
 	if (!tags.length) return { text, fixed: 0 };
 
 	const escaped = tags.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -379,17 +392,20 @@ function fixTagsInText(text) {
 	// 匹配所有完整标签
 	const tagRe = new RegExp(`<\\/?(${escaped.join('|')})\\b[^>]*?(?<!\\/)>`, 'gi');
 
-	const stack = [];       // [{ name }]
-	const orphanCloses = []; // 孤立的闭合标签名（需要补开标签）
-	const fixPoints = [];   // [{ name, pos }] 需要补闭的位置
+	const stack = [];         // [{ name }]
+	const orphanCloses = [];   // [{ name, pos }] 孤立的闭合标签（需要补开标签）
+	const fixPoints = [];      // [{ name, pos }] 需要补闭的位置
+	const seenTags = [];       // [{ name, pos, isClose }] 所有已匹配的标签位置
 
 	let m;
 	while ((m = tagRe.exec(body)) !== null) {
 		const full = m[0];
 		const name = m[1];
 		const pos = m.index;
+		const isClose = full.startsWith('</');
+		seenTags.push({ name, pos, isClose });
 
-		if (full.startsWith('</')) {
+		if (isClose) {
 			// 闭合标签：从栈中找匹配的开标签并弹出
 			let found = -1;
 			for (let i = stack.length - 1; i >= 0; i--) {
@@ -404,7 +420,7 @@ function fixTagsInText(text) {
 					}
 				}
 			} else {
-				orphanCloses.push(name);
+				orphanCloses.push({ name, pos });
 			}
 		} else {
 			// 开标签：检查同级互斥
@@ -438,17 +454,36 @@ function fixTagsInText(text) {
 		}
 	}
 
-	for (const g of grouped) {
-		const block = g.names.map(n => `</${n}>\n`).join('');
-		body = body.slice(0, g.pos) + block + body.slice(g.pos);
-		fixed += g.names.length;
+	// 补开标签（孤儿闭标签）：插入在最近子标签之前
+	const orphanFixPoints = []; // [{ pos, name }]
+
+	for (const oc of orphanCloses) {
+		// 递归获取 oc.name 的所有子孙标签
+		const descendants = new Set();
+		(function collect(n) {
+			const kids = children[n];
+			if (!kids) return;
+			for (const k of kids) { descendants.add(k); collect(k); }
+		})(oc.name);
+
+		// 在 seenTags 中找出现在 oc.pos 之前的子孙标签，取最早位置
+		const childHits = seenTags.filter(t => !t.isClose && descendants.has(t.name) && t.pos < oc.pos);
+		const insertPos = childHits.length > 0
+			? Math.min(...childHits.map(t => t.pos))
+			: 0; // 没找到子标签 → 回退到开头
+
+		orphanFixPoints.push({ pos: insertPos, name: oc.name });
 	}
 
-	// 前置补开标签（孤儿闭标签）
-	for (const tag of orphanCloses) {
-		body = `<${tag}>\n` + body;
-		fixed++;
+	// 从后往前一次性插入所有修复（闭标签 + 孤儿开标签）
+	const allInserts = [...grouped.map(g => ({ pos: g.pos, text: g.names.map(n => `</${n}>\n`).join('') })),
+		...orphanFixPoints.map(o => ({ pos: o.pos, text: `<${o.name}>\n` }))];
+	allInserts.sort((a, b) => b.pos - a.pos);
+
+	for (const ins of allInserts) {
+		body = body.slice(0, ins.pos) + ins.text + body.slice(ins.pos);
 	}
+	fixed += grouped.reduce((s, g) => s + g.names.length, 0) + orphanFixPoints.length;
 
 	// 尾部补闭合标签（栈中剩余）
 	while (stack.length > 0) {
