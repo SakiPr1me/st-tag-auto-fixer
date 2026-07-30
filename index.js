@@ -782,7 +782,7 @@ jQuery(async () => {
 <div class="extension-settings" id="${extensionName}_s">
 <div class="inline-drawer">
 <div class="inline-drawer-toggle inline-drawer-header">
-<b>Tag Auto Fixer</b>
+<b>一键标签修复</b>
 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
 </div>
 <div class="inline-drawer-content" style="display:none">
