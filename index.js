@@ -39,7 +39,9 @@ const defaultSettings = {
 	showMenuBtn: true,
 	autoFixEnabled: false,   // 每轮输出结束自动修（默认关，谨慎勾选）
 	wrapMissingEnabled: false, // 智能补全：标签整块丢失时推断补回（默认关，谨慎勾选）
-	htmlBlacklist: DEFAULT_HTML_BLACKLIST.join('\n'), // 扫描时跳过的 HTML 标签（可增删）
+	htmlContainer: 'extra',   // 小剧场/HTML 容器标签：扫描时其内部一律跳过（可多个，一行一个）
+	autoDetectContainer: true, // 扫描时自动识别小剧场容器（护栏：只填"树外未知顶层块"）
+	htmlBlacklist: DEFAULT_HTML_BLACKLIST.join('\n'), // 扫描时跳过的 HTML 标签（兜底，可增删）
 };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
@@ -50,6 +52,8 @@ if (settings.showMenuBtn === undefined) settings.showMenuBtn = true;
 if (settings.autoFixEnabled === undefined) settings.autoFixEnabled = false;
 if (settings.wrapMissingEnabled === undefined) settings.wrapMissingEnabled = false;
 if (settings.htmlBlacklist === undefined) settings.htmlBlacklist = DEFAULT_HTML_BLACKLIST.join('\n');
+if (settings.htmlContainer === undefined) settings.htmlContainer = 'extra';
+if (settings.autoDetectContainer === undefined) settings.autoDetectContainer = true;
 
 // ========== 解析标签树（缩进 → 嵌套层级）==========
 
@@ -90,6 +94,53 @@ function parseTagTree() {
 	return { allTags: [...allTags], siblings, children };
 }
 
+// ========== 自动识别"小剧场/HTML 容器" ==========
+// 护栏（全部满足才算候选）：
+//   1. 顶层块（不嵌套在其它块里）
+//   2. 名字不在当前标签树里（树里的是用户自己的结构标签，绝不猜）
+//   3. 不在已配置的容器里、也不在 HTML 黑名单里
+//   4. 块内部有明显 HTML 特征（div/span/table 等标签，或 class=/style= 等属性）
+// 返回候选名字列表（按出现顺序，已去重）。
+function detectHtmlContainer(mes, treeNames, containerNames, blacklist) {
+	const re = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*?>/g;
+	const events = [];
+	let m;
+	while ((m = re.exec(mes)) !== null) {
+		events.push({ name: m[1], isClose: m[0].startsWith('</'), pos: m.index, len: m[0].length });
+	}
+
+	// 栈式配对：记录每个完整块区间及其嵌套深度
+	const stack = [];
+	const ranges = [];
+	for (const ev of events) {
+		if (!ev.isClose) {
+			stack.push({ name: ev.name, startEnd: ev.pos + ev.len });
+		} else {
+			for (let i = stack.length - 1; i >= 0; i--) {
+				if (stack[i].name.toLowerCase() === ev.name.toLowerCase()) {
+					const op = stack.splice(i, 1)[0];
+					ranges.push({ name: op.name, startEnd: op.startEnd, endPos: ev.pos, depth: stack.length });
+					break;
+				}
+			}
+		}
+	}
+
+	const HTML_SIG_TAGS = /<(?:div|span|table|tr|td|th|img|a|ul|ol|li|style|script|form|input|button|label|select|option|iframe|video|audio|marquee|nav|header|footer|section|article|br|hr)\b/i;
+	const HTML_SIG_ATTRS = /\b(?:class|style|id|width|height|src|href|onclick|onload|background|color|font-family|font-size)\s*=/i;
+
+	const cands = [];
+	for (const r of ranges) {
+		if (r.depth !== 0) continue;
+		if (treeNames.has(r.name)) continue;
+		if (containerNames.has(r.name)) continue;
+		if (blacklist.has(r.name.toLowerCase())) continue;
+		const inner = mes.slice(r.startEnd, r.endPos);
+		if (HTML_SIG_TAGS.test(inner) || HTML_SIG_ATTRS.test(inner)) cands.push(r.name);
+	}
+	return [...new Set(cands)];
+}
+
 // ========== 扫描消息、重建标签树 ==========
 
 function scanAndFill(replaceMode = false) {
@@ -109,15 +160,33 @@ function scanAndFill(replaceMode = false) {
 	clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
 	clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
-	// 挖空 <extra>...</extra> 的内部（保留 extra 标签本身）：
-	// 用户格式约定——HTML/杂物永远放在 extra 里，所以 extra 内部的一切标签都不进扫描。
-	// 这是结构性方案：不依赖具体名字，AI 在 extra 里生成什么噪音都能被挡掉。
-	clean = clean.replace(/(<extra(?:\s[^>]*)?>)[\s\S]*?(<\/extra(?:\s[^>]*)?>)/gi, '$1$2');
-
 	// HTML 黑名单：从设置读取（设置面板可增删）。扫描时跳过这些名字，避免 AI 随手生成的 <b>/<i>/<div>/<br> 混进标签树。
 	// 规则：名字已在"当前标签树"里声明的（如 RP 标签 I 恰好叫 I）→ 永不滤，尊重用户自己的结构标签。
 	const HTML_TAGS = new Set((settings.htmlBlacklist || '').split(/[\s,]+/).filter(Boolean));
 	const treeNames = new Set(settings.tagTree.split('\n').map(l => l.trim()).filter(Boolean));
+
+	// 小剧场/HTML 容器：用户可配置的标签名（默认 extra）。扫描时这些标签的内部一律跳过（保留标签本身）。
+	let containerNames = new Set((settings.htmlContainer || '').split(/[\s,]+/).filter(Boolean));
+
+	// 自动识别（护栏）：只填"不在标签树、不在黑名单、顶层未知块、且有明显 HTML 特征"的名字。
+	// 防止误填 content 这类已声明的正文块 → 绝不可能挖空正文。
+	if (settings.autoDetectContainer) {
+		const cands = detectHtmlContainer(lastMsg.mes, treeNames, containerNames, HTML_TAGS);
+		if (cands.length === 1 && !containerNames.has(cands[0])) {
+			containerNames.add(cands[0]);
+			settings.htmlContainer = [...containerNames].join('\n');
+			saveSettingsDebounced();
+			toastr?.info?.(`🔍 检测到疑似小剧场标签 <${cands[0]}>，已自动加入跳过列表（可在设置里改）`);
+		} else if (cands.length > 1) {
+			toastr?.info?.(`🔍 检测到多个疑似小剧场标签（${cands.join('、')}），请在设置里手动指定`);
+		}
+	}
+
+	// 挖空容器内部（保留容器标签本身）：容器里的 HTML/杂物标签一律不进扫描
+	for (const nm of containerNames) {
+		const esc = nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		clean = clean.replace(new RegExp(`(<${esc}(?:\\s[^>]*)?>)[\\s\\S]*?(<\\/${esc}(?:\\s[^>]*)?>)`, 'gi'), '$1$2');
+	}
 
 	// 拆出所有标签事件（排除自闭合 <.../> 和未声明为结构标签的 HTML 标签）
 	const tagRe = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*?(?<!\/)>/g;
@@ -1119,16 +1188,20 @@ jQuery(async () => {
 <textarea id="${extensionName}_tree" class="text_pole" style="width:100%;height:220px;font-family:monospace">${settings.tagTree}</textarea>
 
 	<p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
-	🔻 <span id="${extensionName}_htmlbl_toggle" style="cursor:pointer">HTML 黑名单（点击展开/收起）</span>
+	🔻 <span id="${extensionName}_htmlbl_toggle" style="cursor:pointer">小剧场/HTML 处理（点击展开/收起）</span>
 	</p>
 	<div id="${extensionName}_htmlbl_box" style="display:none">
-	<textarea id="${extensionName}_htmlbl" class="text_pole" style="width:100%;height:80px;font-family:monospace">${settings.htmlBlacklist}</textarea>
+	<p style="font-size:0.75em;color:var(--grey_color);margin-bottom:3px">① 小剧场/HTML 容器标签（扫描时这些标签的<b>内部一律跳过</b>，一个一行）：</p>
+	<textarea id="${extensionName}_container" class="text_pole" style="width:100%;height:40px;font-family:monospace">${settings.htmlContainer}</textarea>
+	<label style="cursor:pointer;font-size:0.75em;display:flex;align-items:center;gap:4px;margin-top:4px"><input type="checkbox" id="${extensionName}_chk_detect" ${settings.autoDetectContainer ? 'checked' : ''}> 扫描时自动识别（发现明显 HTML 特征的最外层未知标签 → 自动填入）</label>
+	<p style="font-size:0.75em;color:var(--grey_color);margin-top:6px;margin-bottom:3px">② HTML 黑名单（兜底，容器之外的保险丝）：</p>
+	<textarea id="${extensionName}_htmlbl" class="text_pole" style="width:100%;height:60px;font-family:monospace">${settings.htmlBlacklist}</textarea>
 	<div style="display:flex;gap:6px;margin-top:4px">
-	<button id="${extensionName}_htmlbl_reset" class="menu_button" style="flex:1;padding:4px;font-size:0.8em">↺ 恢复默认</button>
+	<button id="${extensionName}_htmlbl_reset" class="menu_button" style="flex:1;padding:4px;font-size:0.8em">↺ 黑名单恢复默认</button>
 	</div>
 	<p style="font-size:0.7em;color:var(--grey_color);margin-top:3px;line-height:1.5">
-	扫描时跳过这些标签（一个一行，空格也行）。<b>已写进上面标签树的名字永远不会被滤</b>；
-	想用黑名单里的名字当自己的标签 → 把它加进标签树即可，或直接删掉这一行。
+	默认容器是 <code>extra</code>；不是所有人都用 extra——改成你自己的即可。<br>
+	<b>已写进标签树的名字永远不会被滤/跳过</b>；自动识别也只填"树外未知顶层块"，不会动 content 这类已声明块。
 	</p>
 	</div>
 
@@ -1174,8 +1247,16 @@ jQuery(async () => {
 		saveSettingsDebounced();
 	});
 
-	// HTML 黑名单：展开/收起 + 编辑 + 恢复默认
+	// 小剧场/HTML 处理：展开/收起 + 容器编辑 + 自动识别开关 + 黑名单编辑/恢复
 	$(`#${extensionName}_htmlbl_toggle`).on('click', () => { $(`#${extensionName}_htmlbl_box`).slideToggle(150); });
+	$(`#${extensionName}_container`).on('input', function() {
+		settings.htmlContainer = $(this).val();
+		saveSettingsDebounced();
+	});
+	$(`#${extensionName}_chk_detect`).on('change', function() {
+		settings.autoDetectContainer = this.checked;
+		saveSettingsDebounced();
+	});
 	$(`#${extensionName}_htmlbl`).on('input', function() {
 		settings.htmlBlacklist = $(this).val();
 		saveSettingsDebounced();
