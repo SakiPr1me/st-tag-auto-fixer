@@ -109,6 +109,11 @@ function scanAndFill(replaceMode = false) {
 	clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
 	clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
+	// 挖空 <extra>...</extra> 的内部（保留 extra 标签本身）：
+	// 用户格式约定——HTML/杂物永远放在 extra 里，所以 extra 内部的一切标签都不进扫描。
+	// 这是结构性方案：不依赖具体名字，AI 在 extra 里生成什么噪音都能被挡掉。
+	clean = clean.replace(/(<extra(?:\s[^>]*)?>)[\s\S]*?(<\/extra(?:\s[^>]*)?>)/gi, '$1$2');
+
 	// HTML 黑名单：从设置读取（设置面板可增删）。扫描时跳过这些名字，避免 AI 随手生成的 <b>/<i>/<div>/<br> 混进标签树。
 	// 规则：名字已在"当前标签树"里声明的（如 RP 标签 I 恰好叫 I）→ 永不滤，尊重用户自己的结构标签。
 	const HTML_TAGS = new Set((settings.htmlBlacklist || '').split(/[\s,]+/).filter(Boolean));
