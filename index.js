@@ -18,8 +18,9 @@ summary
 extra
 NG_scene`;
 
-// 内部 HTML 标签签名（用户不可见、不需要管理）：扫描时用于识别"本身就是 HTML 噪音"的名字。
-// summary 已特意移除——它是很多 RP 格式的正式标签，交给标签树声明来保护，绝不当作噪音滤掉。
+// 仅供"自动识别容器"内部排除用：这些是 HTML 标签本身，绝不能把它们当"小剧场容器"自动填入。
+// ⚠️ 它不影响扫描——任何标签（包括 div/span/code）都能正常扫进树。
+// summary 已特意移除——它是很多 RP 格式的正式标签，不受此名单约束。
 const HTML_TAG_NAMES = [
 	'html', 'head', 'body', 'div', 'span', 'p', 'b', 'i', 'em', 'strong', 'u', 's',
 	'small', 'sub', 'sup', 'br', 'hr', 'a', 'img', 'ul', 'ol', 'li', 'table', 'tr',
@@ -96,10 +97,10 @@ function parseTagTree() {
 // 护栏（全部满足才算候选）：
 //   1. 顶层块（不嵌套在其它块里）
 //   2. 名字不在当前标签树里（树里的是用户自己的结构标签，绝不猜）
-//   3. 不在已配置的容器里、也不在 HTML 黑名单里
+//   3. 不在已配置的容器里、也不在 HTML 标签本身（excludeTags）
 //   4. 块内部有明显 HTML 特征（div/span/table 等标签，或 class=/style= 等属性）
 // 返回候选名字列表（按出现顺序，已去重）。
-function detectHtmlContainer(mes, treeNames, containerNames, blacklist) {
+function detectHtmlContainer(mes, treeNames, containerNames, excludeTags) {
 	const re = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*?>/g;
 	const events = [];
 	let m;
@@ -132,7 +133,7 @@ function detectHtmlContainer(mes, treeNames, containerNames, blacklist) {
 		if (r.depth !== 0) continue;
 		if (treeNames.has(r.name)) continue;
 		if (containerNames.has(r.name)) continue;
-		if (blacklist.has(r.name.toLowerCase())) continue;
+		if (excludeTags.has(r.name.toLowerCase())) continue;
 		const inner = mes.slice(r.startEnd, r.endPos);
 		if (HTML_SIG_TAGS.test(inner) || HTML_SIG_ATTRS.test(inner)) cands.push(r.name);
 	}
@@ -158,18 +159,16 @@ function scanAndFill(replaceMode = false) {
 	clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
 	clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
-	// HTML 签名名单（内部固定，无需用户管理）：扫描时跳过这些名字，避免 AI 随手生成的 <b>/<i>/<div>/<br> 混进标签树。
-	// 规则：名字已在"当前标签树"里声明的（如 RP 标签 I 恰好叫 I）→ 永不滤，尊重用户自己的结构标签。
-	const HTML_TAGS = new Set(HTML_TAG_NAMES);
+	// 树内声明的名字：权威依据（已在树里的任何名字都保留，扫描/跳过都不碰它）
 	const treeNames = new Set(settings.tagTree.split('\n').map(l => l.trim()).filter(Boolean));
 
 	// 小剧场/HTML 容器：用户可配置的标签名（默认 extra）。扫描时这些标签的内部一律跳过（保留标签本身）。
 	let containerNames = new Set((settings.htmlContainer || '').split(/[\s,]+/).filter(Boolean));
 
-	// 自动识别（护栏）：只填"不在标签树、不在黑名单、顶层未知块、且有明显 HTML 特征"的名字。
-	// 防止误填 content 这类已声明的正文块 → 绝不可能挖空正文。
+	// 自动识别（可选）：发现"树外未知顶层块 + 明显 HTML 特征" → 自动把它加进容器名单。
+	// HTML 标签本身（div/span 等）绝不会被填成容器。
 	if (settings.autoDetectContainer) {
-		const cands = detectHtmlContainer(lastMsg.mes, treeNames, containerNames, HTML_TAGS);
+		const cands = detectHtmlContainer(lastMsg.mes, treeNames, containerNames, new Set(HTML_TAG_NAMES));
 		if (cands.length === 1 && !containerNames.has(cands[0])) {
 			containerNames.add(cands[0]);
 			settings.htmlContainer = [...containerNames].join('\n');
@@ -186,40 +185,17 @@ function scanAndFill(replaceMode = false) {
 		clean = clean.replace(new RegExp(`(<${esc}(?:\\s[^>]*)?>)[\\s\\S]*?(<\\/${esc}(?:\\s[^>]*)?>)`, 'gi'), '$1$2');
 	}
 
-	// 拆出所有标签事件（先收集，再按嵌套深度决定是否当 HTML 噪音滤掉）
+	// 拆出所有标签事件——不做任何 HTML 名字过滤，任何标签都能扫进树。
+	// 噪音交给"容器挖空"兜底；重复多次的内联标签会被下面的内联过滤自动丢弃。
 	const tagRe = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*?(?<!\/)>/g;
-	const rawEvents = [];
-	let m;
-	while ((m = tagRe.exec(clean)) !== null) {
-		rawEvents.push({ name: m[1], isClose: m[0].startsWith('</'), pos: m.index });
-	}
-
-	// 计算每个事件的嵌套深度（0 = 顶层）
-	const depthStack = [];
-	for (const ev of rawEvents) {
-		if (!ev.isClose) {
-			ev.depth = depthStack.length;
-			depthStack.push({ name: ev.name });
-		} else {
-			let found = -1;
-			for (let i = depthStack.length - 1; i >= 0; i--) {
-				if (depthStack[i].name.toLowerCase() === ev.name.toLowerCase()) { found = i; break; }
-			}
-			ev.depth = found >= 0 ? found : depthStack.length;
-			if (found >= 0) depthStack.splice(found, 1);
-		}
-	}
-
-	// HTML 噪音过滤：只滤"嵌套在别的块里、且未在标签树声明"的 HTML 名。
-	// 顶层出现的 HTML 名（用户可能拿来当正式结构块，如 <code>）→ 保留，扫进树。
-	// 想用嵌套的 HTML 名当标签？把它加进标签树声明即可（树内声明永不滤）。
 	const allTags = [];
 	const tagCount = {};
-	for (const ev of rawEvents) {
-		const isHtmlNoise = HTML_TAGS.has(ev.name.toLowerCase()) && !treeNames.has(ev.name) && ev.depth > 0;
-		if (isHtmlNoise) continue;
-		allTags.push({ name: ev.name, isClose: ev.isClose, pos: ev.pos });
-		tagCount[ev.name] = (tagCount[ev.name] || 0) + 1;
+
+	let m;
+	while ((m = tagRe.exec(clean)) !== null) {
+		const name = m[1];
+		allTags.push({ name, isClose: m[0].startsWith('</'), pos: m.index });
+		tagCount[name] = (tagCount[name] || 0) + 1;
 	}
 
 	if (!allTags.length) { toastr?.info?.('未检测到任何标签'); return; }
@@ -1209,16 +1185,19 @@ jQuery(async () => {
 <textarea id="${extensionName}_tree" class="text_pole" style="width:100%;height:220px;font-family:monospace">${settings.tagTree}</textarea>
 
 	<p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
-	🔻 <span id="${extensionName}_htmlbl_toggle" style="cursor:pointer">小剧场/HTML 处理（点击展开/收起）</span>
+	🔻 <span id="${extensionName}_html_toggle" style="cursor:pointer">小剧场/HTML 容器（点击展开/收起）</span>
 	</p>
-	<div id="${extensionName}_htmlbl_box" style="display:none">
-	<p style="font-size:0.75em;color:var(--grey_color);margin-bottom:3px">① 小剧场/HTML 容器标签（扫描时这些标签的<b>内部一律跳过</b>，一个一行）：</p>
+	<div id="${extensionName}_html_box" style="display:none">
+	<p style="font-size:0.75em;color:var(--grey_color);margin-bottom:3px">① 容器标签（扫描时这些标签的<b>内部一律跳过</b>、保留标签本身。一个一行，可多个）：</p>
 	<textarea id="${extensionName}_container" class="text_pole" style="width:100%;height:40px;font-family:monospace">${settings.htmlContainer}</textarea>
 	<label style="cursor:pointer;font-size:0.75em;display:flex;align-items:center;gap:4px;margin-top:4px"><input type="checkbox" id="${extensionName}_chk_detect" ${settings.autoDetectContainer ? 'checked' : ''}> 扫描时自动识别（发现明显 HTML 特征的最外层未知标签 → 自动填入）</label>
-	<p style="font-size:0.7em;color:var(--grey_color);margin-top:6px;line-height:1.5">
-	默认容器是 <code>extra</code>；不是所有人都用 extra——改成你自己的即可。<br>
-	<b>已写进标签树的名字永远不会被滤/跳过</b>；自动识别也只填"树外未知顶层块"，不会动 content 这类已声明块。<br>
-	HTML 噪音（<code>&lt;div&gt;</code>/<code>&lt;b&gt;</code> 等）由插件自动识别：<b>顶层</b>出现的标签会保留（可能是你的正式块，如 <code>&lt;code&gt;</code>），<b>嵌在其它块里</b>的才当噪音滤掉。想用任何名字当标签 → 写进标签树即可。
+	<p style="font-size:0.72em;color:var(--grey_color);margin-top:6px;line-height:1.6">
+	<b>这个容器是干什么的？</b><br>
+	AI 偶尔会吐 HTML 或小剧场内容（<code>&lt;div&gt;</code>/<code>&lt;b&gt;</code> 等）。让 AI 把这类内容放进一个专属标签块（默认 <code>extra</code>），扫描时这些块的<b>内部整体跳过</b>，HTML 就不会混进标签树。<br>
+	不是所有人都用 <code>extra</code>——改成你自己的容器名即可；有几个就一行一个。<br>
+	<b>已写进标签树的名字永远不会被跳过</b>。<br>
+	「自动识别」：扫描时若发现某个"不在标签树里的顶层块"内部有明显 HTML 特征，会自动把它的名字填进上面，并弹提示。<br>
+	💡 没有黑名单了——任何标签都能正常扫进树；扫进去后发现是噪音，删掉它或把它加进容器即可。
 	</p>
 	</div>
 
@@ -1264,8 +1243,8 @@ jQuery(async () => {
 		saveSettingsDebounced();
 	});
 
-	// 小剧场/HTML 处理：展开/收起 + 容器编辑 + 自动识别开关
-	$(`#${extensionName}_htmlbl_toggle`).on('click', () => { $(`#${extensionName}_htmlbl_box`).slideToggle(150); });
+	// 小剧场/HTML 容器：展开/收起 + 容器编辑 + 自动识别开关
+	$(`#${extensionName}_html_toggle`).on('click', () => { $(`#${extensionName}_html_box`).slideToggle(150); });
 	$(`#${extensionName}_container`).on('input', function() {
 		settings.htmlContainer = $(this).val();
 		saveSettingsDebounced();
