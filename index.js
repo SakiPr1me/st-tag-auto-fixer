@@ -186,17 +186,40 @@ function scanAndFill(replaceMode = false) {
 		clean = clean.replace(new RegExp(`(<${esc}(?:\\s[^>]*)?>)[\\s\\S]*?(<\\/${esc}(?:\\s[^>]*)?>)`, 'gi'), '$1$2');
 	}
 
-	// 拆出所有标签事件（排除自闭合 <.../> 和未声明为结构标签的 HTML 标签）
+	// 拆出所有标签事件（先收集，再按嵌套深度决定是否当 HTML 噪音滤掉）
 	const tagRe = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*?(?<!\/)>/g;
-	const allTags = [];
-	const tagCount = {};
-
+	const rawEvents = [];
 	let m;
 	while ((m = tagRe.exec(clean)) !== null) {
-		const name = m[1];
-		if (HTML_TAGS.has(name.toLowerCase()) && !treeNames.has(name)) continue; // 跳过 HTML 标签（树内已声明的不滤）
-		allTags.push({ name, isClose: m[0].startsWith('</'), pos: m.index });
-		tagCount[name] = (tagCount[name] || 0) + 1;
+		rawEvents.push({ name: m[1], isClose: m[0].startsWith('</'), pos: m.index });
+	}
+
+	// 计算每个事件的嵌套深度（0 = 顶层）
+	const depthStack = [];
+	for (const ev of rawEvents) {
+		if (!ev.isClose) {
+			ev.depth = depthStack.length;
+			depthStack.push({ name: ev.name });
+		} else {
+			let found = -1;
+			for (let i = depthStack.length - 1; i >= 0; i--) {
+				if (depthStack[i].name.toLowerCase() === ev.name.toLowerCase()) { found = i; break; }
+			}
+			ev.depth = found >= 0 ? found : depthStack.length;
+			if (found >= 0) depthStack.splice(found, 1);
+		}
+	}
+
+	// HTML 噪音过滤：只滤"嵌套在别的块里、且未在标签树声明"的 HTML 名。
+	// 顶层出现的 HTML 名（用户可能拿来当正式结构块，如 <code>）→ 保留，扫进树。
+	// 想用嵌套的 HTML 名当标签？把它加进标签树声明即可（树内声明永不滤）。
+	const allTags = [];
+	const tagCount = {};
+	for (const ev of rawEvents) {
+		const isHtmlNoise = HTML_TAGS.has(ev.name.toLowerCase()) && !treeNames.has(ev.name) && ev.depth > 0;
+		if (isHtmlNoise) continue;
+		allTags.push({ name: ev.name, isClose: ev.isClose, pos: ev.pos });
+		tagCount[ev.name] = (tagCount[ev.name] || 0) + 1;
 	}
 
 	if (!allTags.length) { toastr?.info?.('未检测到任何标签'); return; }
@@ -1195,7 +1218,7 @@ jQuery(async () => {
 	<p style="font-size:0.7em;color:var(--grey_color);margin-top:6px;line-height:1.5">
 	默认容器是 <code>extra</code>；不是所有人都用 extra——改成你自己的即可。<br>
 	<b>已写进标签树的名字永远不会被滤/跳过</b>；自动识别也只填"树外未知顶层块"，不会动 content 这类已声明块。<br>
-	HTML 噪音（<code>&lt;div&gt;</code>/<code>&lt;b&gt;</code> 等）由插件自动识别，无需你管理；<code>summary</code> 这类正式标签不受影响。
+	HTML 噪音（<code>&lt;div&gt;</code>/<code>&lt;b&gt;</code> 等）由插件自动识别：<b>顶层</b>出现的标签会保留（可能是你的正式块，如 <code>&lt;code&gt;</code>），<b>嵌在其它块里</b>的才当噪音滤掉。想用任何名字当标签 → 写进标签树即可。
 	</p>
 	</div>
 
