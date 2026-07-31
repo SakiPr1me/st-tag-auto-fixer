@@ -18,6 +18,20 @@ summary
 extra
 NG_scene`;
 
+// HTML 黑名单默认值：扫描时跳过这些名字，避免 AI 随手生成的 HTML 混进标签树。
+// 可在设置面板里增删；若某名字已写进标签树（如 RP 标签 I 恰好叫 I），永远不会被滤。
+const DEFAULT_HTML_BLACKLIST = [
+	'html', 'head', 'body', 'div', 'span', 'p', 'b', 'i', 'em', 'strong', 'u', 's',
+	'small', 'sub', 'sup', 'br', 'hr', 'a', 'img', 'ul', 'ol', 'li', 'table', 'tr',
+	'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code',
+	'section', 'article', 'nav', 'footer', 'header', 'aside', 'form', 'input',
+	'button', 'label', 'select', 'option', 'style', 'script', 'meta', 'link',
+	'title', 'font', 'center', 'marquee', 'abbr', 'cite', 'mark', 'ins', 'del',
+	'kbd', 'samp', 'var', 'q', 'iframe', 'video', 'audio', 'caption', 'tbody',
+	'thead', 'tfoot', 'col', 'colgroup', 'fieldset', 'legend', 'textarea', 'details',
+	'summary', 'dialog', 'main', 'figure', 'figcaption', 'picture', 'source', 'track',
+];
+
 const defaultSettings = {
 	tagTree: defaultTagTree,
 	showInlineBtn: true,
@@ -25,6 +39,7 @@ const defaultSettings = {
 	showMenuBtn: true,
 	autoFixEnabled: false,   // 每轮输出结束自动修（默认关，谨慎勾选）
 	wrapMissingEnabled: false, // 智能补全：标签整块丢失时推断补回（默认关，谨慎勾选）
+	htmlBlacklist: DEFAULT_HTML_BLACKLIST.join('\n'), // 扫描时跳过的 HTML 标签（可增删）
 };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
@@ -34,6 +49,7 @@ if (settings.showFloatingBtn === undefined) settings.showFloatingBtn = false;
 if (settings.showMenuBtn === undefined) settings.showMenuBtn = true;
 if (settings.autoFixEnabled === undefined) settings.autoFixEnabled = false;
 if (settings.wrapMissingEnabled === undefined) settings.wrapMissingEnabled = false;
+if (settings.htmlBlacklist === undefined) settings.htmlBlacklist = DEFAULT_HTML_BLACKLIST.join('\n');
 
 // ========== 解析标签树（缩进 → 嵌套层级）==========
 
@@ -93,19 +109,9 @@ function scanAndFill(replaceMode = false) {
 	clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
 	clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
-	// 常见 HTML 标签黑名单：扫描时直接排除，避免 AI 随手生成的 <b>/<i>/<div>/<br> 等混进标签树。
-	// 规则：名字已在"当前标签树"里声明的（如你的 RP 标签 I 恰好叫 I）→ 不滤，尊重用户自己的结构标签。
-	const HTML_TAGS = new Set([
-		'html', 'head', 'body', 'div', 'span', 'p', 'b', 'i', 'em', 'strong', 'u', 's',
-		'small', 'sub', 'sup', 'br', 'hr', 'a', 'img', 'ul', 'ol', 'li', 'table', 'tr',
-		'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code',
-		'section', 'article', 'nav', 'footer', 'header', 'aside', 'form', 'input',
-		'button', 'label', 'select', 'option', 'style', 'script', 'meta', 'link',
-		'title', 'font', 'center', 'marquee', 'abbr', 'cite', 'mark', 'ins', 'del',
-		'kbd', 'samp', 'var', 'q', 'iframe', 'video', 'audio', 'caption', 'tbody',
-		'thead', 'tfoot', 'col', 'colgroup', 'fieldset', 'legend', 'textarea', 'details',
-		'summary', 'dialog', 'main', 'figure', 'figcaption', 'picture', 'source', 'track',
-	]);
+	// HTML 黑名单：从设置读取（设置面板可增删）。扫描时跳过这些名字，避免 AI 随手生成的 <b>/<i>/<div>/<br> 混进标签树。
+	// 规则：名字已在"当前标签树"里声明的（如 RP 标签 I 恰好叫 I）→ 永不滤，尊重用户自己的结构标签。
+	const HTML_TAGS = new Set((settings.htmlBlacklist || '').split(/[\s,]+/).filter(Boolean));
 	const treeNames = new Set(settings.tagTree.split('\n').map(l => l.trim()).filter(Boolean));
 
 	// 拆出所有标签事件（排除自闭合 <.../> 和未声明为结构标签的 HTML 标签）
@@ -1107,6 +1113,20 @@ jQuery(async () => {
 
 <textarea id="${extensionName}_tree" class="text_pole" style="width:100%;height:220px;font-family:monospace">${settings.tagTree}</textarea>
 
+	<p style="margin-top:6px;font-size:0.8em;color:var(--grey_color)">
+	🔻 <span id="${extensionName}_htmlbl_toggle" style="cursor:pointer">HTML 黑名单（点击展开/收起）</span>
+	</p>
+	<div id="${extensionName}_htmlbl_box" style="display:none">
+	<textarea id="${extensionName}_htmlbl" class="text_pole" style="width:100%;height:80px;font-family:monospace">${settings.htmlBlacklist}</textarea>
+	<div style="display:flex;gap:6px;margin-top:4px">
+	<button id="${extensionName}_htmlbl_reset" class="menu_button" style="flex:1;padding:4px;font-size:0.8em">↺ 恢复默认</button>
+	</div>
+	<p style="font-size:0.7em;color:var(--grey_color);margin-top:3px;line-height:1.5">
+	扫描时跳过这些标签（一个一行，空格也行）。<b>已写进上面标签树的名字永远不会被滤</b>；
+	想用黑名单里的名字当自己的标签 → 把它加进标签树即可，或直接删掉这一行。
+	</p>
+	</div>
+
 	<div style="display:flex;gap:6px;margin-top:6px">
 	<button id="${extensionName}_scan_replace" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">🔄 全量替换扫描</button>
 	<button id="${extensionName}_scan_append" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">📎 补充扫描</button>
@@ -1147,6 +1167,19 @@ jQuery(async () => {
 	$(`#${extensionName}_tree`).on('input', function() {
 		settings.tagTree = $(this).val();
 		saveSettingsDebounced();
+	});
+
+	// HTML 黑名单：展开/收起 + 编辑 + 恢复默认
+	$(`#${extensionName}_htmlbl_toggle`).on('click', () => { $(`#${extensionName}_htmlbl_box`).slideToggle(150); });
+	$(`#${extensionName}_htmlbl`).on('input', function() {
+		settings.htmlBlacklist = $(this).val();
+		saveSettingsDebounced();
+	});
+	$(`#${extensionName}_htmlbl_reset`).on('click', () => {
+		settings.htmlBlacklist = DEFAULT_HTML_BLACKLIST.join('\n');
+		$(`#${extensionName}_htmlbl`).val(settings.htmlBlacklist);
+		saveSettingsDebounced();
+		toastr?.success?.('✅ 已恢复默认 HTML 黑名单');
 	});
 
 	// 绑定按钮
