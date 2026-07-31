@@ -93,7 +93,22 @@ function scanAndFill(replaceMode = false) {
 	clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
 	clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
-	// 拆出所有标签事件（排除自闭合 <.../>）
+	// 常见 HTML 标签黑名单：扫描时直接排除，避免 AI 随手生成的 <b>/<i>/<div>/<br> 等混进标签树。
+	// 规则：名字已在"当前标签树"里声明的（如你的 RP 标签 I 恰好叫 I）→ 不滤，尊重用户自己的结构标签。
+	const HTML_TAGS = new Set([
+		'html', 'head', 'body', 'div', 'span', 'p', 'b', 'i', 'em', 'strong', 'u', 's',
+		'small', 'sub', 'sup', 'br', 'hr', 'a', 'img', 'ul', 'ol', 'li', 'table', 'tr',
+		'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code',
+		'section', 'article', 'nav', 'footer', 'header', 'aside', 'form', 'input',
+		'button', 'label', 'select', 'option', 'style', 'script', 'meta', 'link',
+		'title', 'font', 'center', 'marquee', 'abbr', 'cite', 'mark', 'ins', 'del',
+		'kbd', 'samp', 'var', 'q', 'iframe', 'video', 'audio', 'caption', 'tbody',
+		'thead', 'tfoot', 'col', 'colgroup', 'fieldset', 'legend', 'textarea', 'details',
+		'summary', 'dialog', 'main', 'figure', 'figcaption', 'picture', 'source', 'track',
+	]);
+	const treeNames = new Set(settings.tagTree.split('\n').map(l => l.trim()).filter(Boolean));
+
+	// 拆出所有标签事件（排除自闭合 <.../> 和未声明为结构标签的 HTML 标签）
 	const tagRe = /<\/?([a-zA-Z_][a-zA-Z0-9_.-]*)\b[^>]*?(?<!\/)>/g;
 	const allTags = [];
 	const tagCount = {};
@@ -101,6 +116,7 @@ function scanAndFill(replaceMode = false) {
 	let m;
 	while ((m = tagRe.exec(clean)) !== null) {
 		const name = m[1];
+		if (HTML_TAGS.has(name.toLowerCase()) && !treeNames.has(name)) continue; // 跳过 HTML 标签（树内已声明的不滤）
 		allTags.push({ name, isClose: m[0].startsWith('</'), pos: m.index });
 		tagCount[name] = (tagCount[name] || 0) + 1;
 	}
