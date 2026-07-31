@@ -5,6 +5,6 @@
     "optional": [],
     "js": "index.js",
     "author": "SakiPr1me",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "一键修复AI输出中缺失的XML标签闭合；支持智能补全、每轮自动修复、一键回退"
 }

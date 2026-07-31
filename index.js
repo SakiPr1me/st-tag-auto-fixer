@@ -851,13 +851,26 @@ async function applyFixedMessage(ctx, messageId, text, recordUndo = true) {
 
 let undoSlot = null; // { chatId, messageId, original }（单槽，只记最近一次）
 
-const undoBtnId = `${extensionName}_undo_btn`;
+const undoBtnId = `${extensionName}_undo_btn`;      // 主页面右下角浮动按钮（修过之后才出现）
+const undoPanelBtnId = `${extensionName}_undo_panel`; // 设置面板常驻按钮（有可回退内容才可点）
 function updateUndoBtn() {
 	$(`#${undoBtnId}`).remove();
-	if (!undoSlot) return;
 	const ctx = getContext();
-	// 用 chatId 隔离聊天：切到别的聊天就不显示旧撤销按钮
-	if (!ctx || (undoSlot.chatId && ctx.chatId && undoSlot.chatId !== ctx.chatId)) return;
+	// 用 chatId 隔离聊天：切到别的聊天就算作废
+	let valid = false;
+	if (undoSlot && ctx) {
+		const sameChat = !undoSlot.chatId || !ctx.chatId || undoSlot.chatId === ctx.chatId;
+		valid = sameChat && !!ctx.chat?.[undoSlot.messageId];
+	}
+
+	// 面板常驻按钮状态同步
+	const $panelBtn = $(`#${undoPanelBtnId}`);
+	if ($panelBtn.length) {
+		$panelBtn.prop('disabled', !valid).css('opacity', valid ? 1 : 0.4);
+	}
+
+	// 主页面右下角浮动按钮：仅在有可回退项时显示
+	if (!valid) return;
 	$('body').append(`<div id="${undoBtnId}" title="回退上一次修复" style="
 		position:fixed;bottom:130px;right:20px;z-index:9999;
 		background:var(--golden-color, #e0a800);color:#fff;
@@ -1076,20 +1089,20 @@ jQuery(async () => {
 	<button id="${extensionName}_scan_append" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">📎 补充扫描</button>
 	</div>
 	<button id="${extensionName}_btn" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">🔧 修复最后一条消息</button>
+	<button id="${extensionName}_undo_panel" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px" disabled>↩️ 回退上一次修复</button>
 	<button id="${extensionName}_reset" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">↺ 重置为默认标签树</button>
 
-	<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grey_outline, rgba(128,128,128,.2));font-size:0.8em;display:flex;flex-direction:column;gap:6px">
-	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_auto" ${settings.autoFixEnabled ? 'checked' : ''}> 每轮输出结束自动修复</label>
-	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_wrap" ${settings.wrapMissingEnabled ? 'checked' : ''}> ⚠️ 智能补全（谨慎勾选）</label>
+	<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grey_outline, rgba(128,128,128,.2))">
+	<div style="display:flex;gap:16px;align-items:center;font-size:0.8em;flex-wrap:wrap">
+	<label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" id="${extensionName}_chk_auto" ${settings.autoFixEnabled ? 'checked' : ''}> 每轮自动修复</label>
+	<label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" id="${extensionName}_chk_wrap" ${settings.wrapMissingEnabled ? 'checked' : ''}> 智能补全</label>
 	</div>
-	<div id="${extensionName}_wrap_warn" style="display:none;margin-top:6px;padding:8px;border:1px solid var(--golden-color, #e0a800);border-radius:6px;font-size:0.75em;color:var(--grey_color);line-height:1.6">
-	<b>智能补全 · 先读完再勾</b><br>
-	这个功能是给 AI 的"整块标签一起弄丢"救场：<br>
-	比如 <code>&lt;Advance&gt;...&lt;/Advance&gt;</code> 整对不见了，只剩里面的 <code>&lt;choice&gt;</code>。<br>
-	插件会根据标签树和前后邻居，把整块<b>猜</b>回来。<br>
-	✅ 标签没丢的正常消息，永远不会被改动。<br>
-	⚠️ 但"猜"偶尔会猜错、猜多，<b>有一定意外可能</b>。<br>
-	💡 出问题别慌：聊天页面右下角会冒出一个<b>「↩️ 回退修复」</b>按钮，点一下立刻还原。
+	<div id="${extensionName}_warn_auto" style="display:none;margin-top:5px;font-size:0.75em;color:var(--golden-color, #e0a800);line-height:1.5">
+	⚠️ <b>每轮自动修复</b>＝每轮 AI 回复完自动修一遍标签。没标签的消息不会动；保险起见，出问题点右上「↩️ 回退修复」。
+	</div>
+	<div id="${extensionName}_warn_wrap" style="display:none;margin-top:5px;font-size:0.75em;color:var(--golden-color, #e0a800);line-height:1.5">
+	⚠️ <b>智能补全</b>＝「连开头带结尾<b>整块丢失</b>」时的救场（比如 <code>&lt;Advance&gt;...&lt;/Advance&gt;</code> 整对没了，只剩里面的 choice）。会靠标签树和前后邻居去猜，偶尔可能猜错。出问题点右上「↩️ 回退修复」。
+	</div>
 	</div>
 
 	<div style="margin-top:8px;font-size:0.8em;display:flex;gap:12px;align-items:center">
@@ -1143,15 +1156,20 @@ jQuery(async () => {
 	// 新功能勾选框
 	$(`#${extensionName}_chk_auto`).on('change', function() {
 		settings.autoFixEnabled = this.checked;
+		$(`#${extensionName}_warn_auto`).toggle(this.checked);
 		saveSettingsDebounced();
 	});
 	$(`#${extensionName}_chk_wrap`).on('change', function() {
 		settings.wrapMissingEnabled = this.checked;
-		$(`#${extensionName}_wrap_warn`).toggle(this.checked);
+		$(`#${extensionName}_warn_wrap`).toggle(this.checked);
 		saveSettingsDebounced();
 	});
-	// 若之前已勾选，初始就展开说明
-	if (settings.wrapMissingEnabled) $(`#${extensionName}_wrap_warn`).show();
+	// 若之前已勾选，初始就展开对应说明
+	if (settings.autoFixEnabled) $(`#${extensionName}_warn_auto`).show();
+	if (settings.wrapMissingEnabled) $(`#${extensionName}_warn_wrap`).show();
+
+	// 常驻"回退上一次修复"按钮
+	$(`#${extensionName}_undo_panel`).on('click', async () => { await undoLastFix(); });
 
 	// 自动修复监听（每轮 AI 输出结束自动修）
 	registerAutoFix();
