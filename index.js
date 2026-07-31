@@ -810,7 +810,8 @@ function getContext() {
 // setChatMessages 同时负责数据更新 + 保存 + 触发渲染（含 Regex 美化）。
 async function applyFixedMessage(ctx, messageId, text, recordUndo = true) {
 	if (recordUndo) {
-		undoSlot = { chatId: ctx.chatId ?? null, messageId, original: ctx.chat[messageId]?.mes ?? null };
+		// fixed 记录写入后的文本，供回退前校验消息是否已被再次改动（防覆盖新内容）
+		undoSlot = { chatId: ctx.chatId ?? null, messageId, original: ctx.chat[messageId]?.mes ?? null, fixed: text };
 		updateUndoBtn();
 	}
 
@@ -894,6 +895,12 @@ async function undoLastFix() {
 	if (!ctx.chat[slot.messageId]) {
 		undoSlot = null; updateUndoBtn();
 		toastr?.warning?.('消息不存在或已被删除');
+		return;
+	}
+	// 防呆：消息已被重生成 / 滑动 / 手动编辑过 → 不再用旧文本覆盖
+	if (slot.fixed !== undefined && ctx.chat[slot.messageId].mes !== slot.fixed) {
+		undoSlot = null; updateUndoBtn();
+		toastr?.info?.('该消息已被改动过，无法回退（自动作废）');
 		return;
 	}
 
@@ -1095,13 +1102,14 @@ jQuery(async () => {
 	<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grey_outline, rgba(128,128,128,.2))">
 	<div style="display:flex;gap:16px;align-items:center;font-size:0.8em;flex-wrap:wrap">
 	<label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" id="${extensionName}_chk_auto" ${settings.autoFixEnabled ? 'checked' : ''}> 每轮自动修复</label>
-	<label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" id="${extensionName}_chk_wrap" ${settings.wrapMissingEnabled ? 'checked' : ''}> 智能补全</label>
+	<label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" id="${extensionName}_chk_wrap" ${settings.wrapMissingEnabled ? 'checked' : ''}> 前后标签都丢时补全</label>
 	</div>
 	<div id="${extensionName}_warn_auto" style="display:none;margin-top:5px;font-size:0.75em;color:var(--golden-color, #e0a800);line-height:1.5">
 	⚠️ <b>每轮自动修复</b>＝每轮 AI 回复完自动修一遍标签。没标签的消息不会动；保险起见，出问题点右上「↩️ 回退修复」。
 	</div>
 	<div id="${extensionName}_warn_wrap" style="display:none;margin-top:5px;font-size:0.75em;color:var(--golden-color, #e0a800);line-height:1.5">
-	⚠️ <b>智能补全</b>＝「连开头带结尾<b>整块丢失</b>」时的救场（比如 <code>&lt;Advance&gt;...&lt;/Advance&gt;</code> 整对没了，只剩里面的 choice）。会靠标签树和前后邻居去猜，偶尔可能猜错。出问题点右上「↩️ 回退修复」。
+	⚠️ <b>谨慎使用</b>。勾选前请先：① 用扫描功能把标签树扫准确；② 确认消息里的内容都有标签包着。<br>
+	功能＝标签<b>连开带闭整对丢失</b>时（如 <code>&lt;Advance&gt;...&lt;/Advance&gt;</code> 整对没了，只剩里面的 choice），靠标签树和前后邻居猜着补回来。偶尔可能猜错，出问题点右上「↩️ 回退修复」。
 	</div>
 	</div>
 
