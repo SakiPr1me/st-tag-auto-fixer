@@ -1,5 +1,7 @@
 import { extension_settings } from "../../../extensions.js";
-import { saveSettingsDebounced } from "../../../../script.js";
+// eventSource / event_types：script.js 已 re-export（SillyTavern/public/script.js 第 325-326 行）
+// 供「每轮输出结束自动修」监听 MESSAGE_RECEIVED 事件
+import { saveSettingsDebounced, eventSource, event_types } from "../../../../script.js";
 
 const extensionName = "tag_auto_fixer";
 const defaultTagTree = `scene
@@ -16,15 +18,35 @@ summary
 extra
 NG_scene`;
 
-const defaultSettings = { tagTree: defaultTagTree, showInlineBtn: true, showFloatingBtn: false, showMenuBtn: true };
+const defaultSettings = {
+	tagTree: defaultTagTree,
+	showInlineBtn: true,
+	showFloatingBtn: false,
+	showMenuBtn: true,
+	autoFixEnabled: false,   // 每轮输出结束自动修（默认关，谨慎勾选）
+	wrapMissingEnabled: false, // 智能补全：标签整块丢失时推断补回（默认关，谨慎勾选）
+};
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
 if (!settings.tagTree) settings.tagTree = defaultTagTree;
 if (settings.showInlineBtn === undefined) settings.showInlineBtn = true;
 if (settings.showFloatingBtn === undefined) settings.showFloatingBtn = false;
 if (settings.showMenuBtn === undefined) settings.showMenuBtn = true;
+if (settings.autoFixEnabled === undefined) settings.autoFixEnabled = false;
+if (settings.wrapMissingEnabled === undefined) settings.wrapMissingEnabled = false;
 
 // ========== 解析标签树（缩进 → 嵌套层级）==========
+
+// 缩进 → 嵌套层级：1 个 Tab = 1 层，2 个空格 = 1 层。
+// 修复：旧逻辑 Math.round(空白字符数 / 2) 对 Tab 缩进会把多级（如 \t\tR）拉平到同级，
+//       导致 R 被误判为 todo 的同级而非子级。这里按"Tab 即一层、两空格即一层"精确换算。
+function indentLevel(line) {
+	const m = line.match(/^[ \t]*/);
+	if (!m || m[0].length === 0) return 0;
+	let level = 0;
+	for (const ch of m[0]) level += (ch === '\t') ? 1 : 0.5;
+	return Math.max(1, Math.round(level));
+}
 
 function parseTagTree() {
 	const lines = settings.tagTree.split('\n').filter(l => l.trim());
@@ -39,7 +61,7 @@ function parseTagTree() {
 		allTags.add(name);
 		if (rawIndent === 0) siblings.add(name);
 
-		const depth = rawIndent === 0 ? 0 : Math.max(1, Math.round(rawIndent / 2));
+		const depth = indentLevel(line);
 		while (stack.length > 0 && stack[stack.length - 1].depth >= depth) stack.pop();
 		if (stack.length > 0) {
 			const parent = stack[stack.length - 1].name;
@@ -278,7 +300,7 @@ function scanAndFill(replaceMode = false) {
 		for (const line of existingLines) {
 			const rawIndent = line.search(/\S/);
 			const name = line.trim();
-			const depth = rawIndent === 0 ? 0 : Math.max(1, Math.round(rawIndent / 2));
+			const depth = indentLevel(line);
 			while (indentStack.length > 0 && indentStack[indentStack.length - 1].depth >= depth) {
 				indentStack.pop();
 			}
@@ -342,6 +364,175 @@ function scanAndFill(replaceMode = false) {
 	const structureNames = Object.keys(tagMeta).length;
 	const totalNames = new Set(ranges.map(r => r.name)).size;
 	toastr?.success?.(`✅ 标签树已重建（${structureNames} 个结构标签，${totalNames - structureNames} 个内联标签已过滤）`);
+}
+
+// ========== 智能补全：补回「连开带闭整个丢失」的标签块 ==========
+// 仅当 settings.wrapMissingEnabled 为 true 时由 fixTagsInText 调用。
+// 触发条件（全部满足才补，缺一不可）：
+//   1. 该标签在整条消息里完全没有出现（开标签和闭标签一起丢了）；
+//   2. 且满足下面两者之一：
+//      a. 祖先补全：它的某个子/孙标签出现了 → 把子标签连成的连续区域包进它；
+//      b. 夹逼补全：它的前兄弟、后兄弟都完整闭合，中间恰好只缺它一个 → 把夹逼区间包进它。
+// 安全保证：结构正确的消息（该标签还在文里）永远不会被本函数改动；
+//           只有本来就缺了整块的坏消息才会被补。
+
+function wrapMissingTags(body, tags, siblings, children) {
+	const escaped = tags.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+	const tagRe = new RegExp(`<\\/?(${escaped.join('|')})\\b[^>]*?(?<!\\/)>`, 'gi');
+
+	// 树的嵌套深度（用于"从内到外"处理，先补最里层，外层再包住里层）
+	const depthMap = {};
+	for (const root of siblings) {
+		depthMap[root] = 0;
+		(function walk(n, d) {
+			for (const k of (children[n] || [])) { depthMap[k] = d + 1; walk(k, d + 1); }
+		})(root, 0);
+	}
+
+	// 父映射：查某标签的兄弟组（顶层组 = siblings；非顶层组 = 其父的直接子集）
+	const parentMap = {};
+	for (const root of siblings) parentMap[root] = null;
+	for (const [p, kids] of Object.entries(children)) {
+		for (const k of kids) parentMap[k] = p;
+	}
+	function siblingGroup(name) {
+		const p = parentMap[name];
+		return p === null ? [...siblings] : [...(children[p] || [])];
+	}
+
+	// 某标签的全量子孙（不含自身）
+	function descendantsOf(name) {
+		const out = new Set();
+		(function collect(n) {
+			for (const k of (children[n] || [])) { out.add(k); collect(k); }
+		})(name);
+		return out;
+	}
+
+	// 扫描当前文本中的树内标签事件
+	function scanEvents(str) {
+		const evs = [];
+		let m;
+		const re = new RegExp(tagRe.source, tagRe.flags);
+		while ((m = re.exec(str)) !== null) {
+			evs.push({ name: m[1], pos: m.index, len: m[0].length, isClose: m[0].startsWith('</') });
+		}
+		return evs;
+	}
+
+	// 祖先补全：把"不被同级兄弟打断"的连续子标签区域，逐段包进缺失的父标签
+	function wrapAncestor(text, miss, descSet, blockers) {
+		const evs = scanEvents(text);
+		const segs = [];
+		let curStart = -1, curEnd = -1, curClosed = false;
+		for (const e of evs) {
+			if (descSet.has(e.name)) {
+				if (curStart < 0) {
+					// 段必须从一个"开标签"开始（孤立闭合不开启新段）
+					if (!e.isClose) { curStart = e.pos; curEnd = e.pos + e.len; curClosed = false; }
+				} else {
+					curEnd = e.pos + e.len;
+					if (e.isClose) curClosed = true;
+				}
+			} else if (curStart >= 0 && blockers.has(e.name)) {
+				if (curClosed) segs.push({ sPos: curStart, ePos: curEnd });
+				curStart = -1; curEnd = -1; curClosed = false;
+			}
+		}
+		if (curStart >= 0 && curClosed) segs.push({ sPos: curStart, ePos: curEnd });
+		if (!segs.length) return { text, added: 0 };
+
+		// 从后往前插入，保证位置偏移不串
+		segs.sort((a, b) => b.sPos - a.sPos);
+		let added = 0;
+		for (const seg of segs) {
+			// 去掉段尾多余空白，避免拼出双换行
+			const inner = text.slice(seg.sPos, seg.ePos).replace(/\s+$/, '');
+			text = text.slice(0, seg.sPos) + `<${miss}>\n` + inner + `\n</${miss}>` + text.slice(seg.ePos);
+			added += 2;
+		}
+		return { text, added };
+	}
+
+	// 判断某标签是否在文本中"恰好一对、完整闭合"
+	function isFullPair(name, evs) {
+		let open = 0, close = 0;
+		for (const e of evs) {
+			if (e.name === name) (e.isClose ? close++ : open++);
+		}
+		return open === 1 && close === 1;
+	}
+	function lastCloseEnd(name, evs) {
+		let pos = -1;
+		for (const e of evs) if (e.name === name && e.isClose) pos = e.pos + e.len;
+		return pos;
+	}
+	function firstOpenPos(name, evs) {
+		for (const e of evs) if (e.name === name && !e.isClose) return e.pos;
+		return -1;
+	}
+
+	// 夹逼补全：前兄弟闭合、后兄弟闭合、中间恰好只缺这一个标签 → 包夹逼区间
+	function wrapSandwich(text, miss, group) {
+		const evs = scanEvents(text);
+		const idx = group.indexOf(miss);
+		if (idx < 0) return { text, added: 0 };
+
+		let li = -1, ri = -1;
+		for (let i = idx - 1; i >= 0; i--) if (isFullPair(group[i], evs)) { li = i; break; }
+		for (let i = idx + 1; i < group.length; i++) if (isFullPair(group[i], evs)) { ri = i; break; }
+		if (li < 0 || ri < 0) return { text, added: 0 };
+
+		// 左右之间的兄弟，除 miss 外若还有缺失 → 无法归属，跳过
+		const present = new Set(evs.map(e => e.name));
+		for (let i = li + 1; i < ri; i++) {
+			if (i !== idx && !present.has(group[i])) return { text, added: 0 };
+		}
+
+		const leftEnd = lastCloseEnd(group[li], evs);
+		const rightStart = firstOpenPos(group[ri], evs);
+		if (leftEnd < 0 || rightStart < 0 || leftEnd > rightStart) return { text, added: 0 };
+
+		const region = text.slice(leftEnd, rightStart);
+		const trimmed = region.replace(/^\s+|\s+$/g, '');
+		if (!trimmed) return { text, added: 0 }; // 空壳不包
+
+		// 区间里若还夹着其它树内标签（非左右锚点）→ 可能吞并别的内容，跳过
+		const regionPresent = new Set(scanEvents(region).map(e => e.name));
+		for (const nm of regionPresent) {
+			if (nm !== group[li] && nm !== group[ri]) return { text, added: 0 };
+		}
+
+		text = text.slice(0, leftEnd) + `\n<${miss}>\n` + trimmed + `\n</${miss}>\n` + text.slice(rightStart);
+		return { text, added: 2 };
+	}
+
+	// ===== 主流程：处理所有缺失标签，从最深到最浅 =====
+	let text = body;
+	let added = 0;
+
+	const initialEvents = scanEvents(text);
+	const present = new Set(initialEvents.map(e => e.name));
+	const missing = tags.filter(t => !present.has(t) && t in depthMap);
+	missing.sort((a, b) => (depthMap[b] || 0) - (depthMap[a] || 0));
+
+	for (const miss of missing) {
+		const descSet = descendantsOf(miss);
+		const group = siblingGroup(miss);
+		const blockers = new Set(group.filter(n => n !== miss));
+		const hasPresentDesc = scanEvents(text).some(e => descSet.has(e.name));
+
+		let r;
+		if (hasPresentDesc) {
+			r = wrapAncestor(text, miss, descSet, blockers);
+		} else {
+			r = wrapSandwich(text, miss, group);
+		}
+		text = r.text;
+		added += r.added;
+	}
+
+	return { text, added };
 }
 
 // ========== 栈式算法修复标签（同级互斥、补开补闭 + 残缺标签补全）==========
@@ -587,6 +778,14 @@ function fixTagsInText(text) {
 		fixed++;
 	}
 
+	// ===== 智能补全（谨慎勾选）：补回"连开带闭整个丢失"的标签块 =====
+	// 只对"树里存在、但全文一次都没出现"的标签动手；结构正确的消息不受影响。
+	if (settings.wrapMissingEnabled) {
+		const wrapResult = wrapMissingTags(body, tags, siblings, children);
+		body = wrapResult.text;
+		fixed += wrapResult.added;
+	}
+
 	return { text: body, fixed };
 }
 
@@ -606,6 +805,120 @@ function getContext() {
 
 // ========== 核心：修复最后一条 AI 消息 + 即时渲染 ==========
 
+// 统一的"写入 + 渲染 + 记录撤销"入口。手动修复和自动修复都走这里。
+// TavernHelper 是 Slash Runner 暴露到 window 的稳定 API；
+// setChatMessages 同时负责数据更新 + 保存 + 触发渲染（含 Regex 美化）。
+async function applyFixedMessage(ctx, messageId, text, recordUndo = true) {
+	if (recordUndo) {
+		undoSlot = { chatId: ctx.chatId ?? null, messageId, original: ctx.chat[messageId]?.mes ?? null };
+		updateUndoBtn();
+	}
+
+	let rendered = false;
+	const TH = window.TavernHelper;
+
+	if (TH?.setChatMessages) {
+		try {
+			await TH.setChatMessages([{ message_id: messageId, message: text }]);
+			rendered = true;
+		} catch (e) {
+			console.warn('[TagAutoFixer] TavernHelper.setChatMessages 失败:', e);
+		}
+	}
+
+	if (!rendered && TH?.refreshOneMessage) {
+		// 回退：手动写数据 + 保存 + 单独触发渲染
+		try {
+			if (ctx.chat[messageId]) ctx.chat[messageId].mes = text;
+			if (ctx.saveChat) await ctx.saveChat();
+			await TH.refreshOneMessage(messageId);
+			rendered = true;
+		} catch (e) {
+			console.warn('[TagAutoFixer] refreshOneMessage 失败:', e);
+		}
+	}
+
+	if (!rendered) {
+		// 最后回退：手动保存数据（可能无法即时刷新显示）
+		if (ctx.chat[messageId]) ctx.chat[messageId].mes = text;
+		if (ctx.saveChat) await ctx.saveChat();
+	}
+
+	return rendered;
+}
+
+// ========== 撤销：回退上一次修复 ==========
+
+let undoSlot = null; // { chatId, messageId, original }（单槽，只记最近一次）
+
+const undoBtnId = `${extensionName}_undo_btn`;
+function updateUndoBtn() {
+	$(`#${undoBtnId}`).remove();
+	if (!undoSlot) return;
+	const ctx = getContext();
+	// 用 chatId 隔离聊天：切到别的聊天就不显示旧撤销按钮
+	if (!ctx || (undoSlot.chatId && ctx.chatId && undoSlot.chatId !== ctx.chatId)) return;
+	$('body').append(`<div id="${undoBtnId}" title="回退上一次修复" style="
+		position:fixed;bottom:130px;right:20px;z-index:9999;
+		background:var(--golden-color, #e0a800);color:#fff;
+		border-radius:16px;padding:6px 14px;font-size:13px;cursor:pointer;
+		box-shadow:0 2px 8px rgba(0,0,0,0.35);user-select:none;opacity:0.95
+	">↩️ 回退修复</div>`);
+	$(`#${undoBtnId}`).on('click', async () => { await undoLastFix(); });
+}
+
+async function undoLastFix() {
+	if (!undoSlot) { toastr?.info?.('没有可回退的修复'); return; }
+	const ctx = getContext();
+	if (!ctx) { toastr?.warning?.('无法获取聊天上下文'); return; }
+	const slot = undoSlot;
+
+	if (slot.chatId && ctx.chatId && slot.chatId !== ctx.chatId) {
+		undoSlot = null; updateUndoBtn();
+		toastr?.info?.('已切换聊天，上次修复无法回退');
+		return;
+	}
+	if (!ctx.chat[slot.messageId]) {
+		undoSlot = null; updateUndoBtn();
+		toastr?.warning?.('消息不存在或已被删除');
+		return;
+	}
+
+	const rendered = await applyFixedMessage(ctx, slot.messageId, slot.original, false);
+	undoSlot = null;
+	updateUndoBtn();
+	toastr?.success?.(rendered ? '✅ 已回退到修复前' : '✅ 已回退（可能需要切换聊天以刷新显示）');
+}
+
+// ========== 自动修复：每轮 AI 输出结束自动修 ==========
+// 事件签名：MESSAGE_RECEIVED (message_id, type)，见 public/scripts/events.js。
+// 触发时机：AI 消息完整落盘后（流式 script.js:3740 / 非流式 script.js:6632）。
+// emit 会 await 本监听器，因此修复 + 重渲染先于 ST 自身渲染完成：无闪烁、无二次冲突。
+// setChatMessages 只触发 MESSAGE_UPDATED、不会触发 MESSAGE_RECEIVED → 不会死循环。
+
+function registerAutoFix() {
+	eventSource.on(event_types.MESSAGE_RECEIVED, async (messageId) => {
+		if (!settings.autoFixEnabled) return;
+		try {
+			const ctx = getContext();
+			if (!ctx?.chat?.length) return;
+			if (!Number.isInteger(messageId) || messageId < 0 || messageId >= ctx.chat.length) return;
+			const mes = ctx.chat[messageId];
+			if (!mes || mes.is_user) return; // 不碰用户消息（含 impersonate 生成的用户消息）
+			if (typeof mes.mes !== 'string' || !mes.mes.includes('<')) return; // 无标签快速跳过
+			const result = fixTagsInText(mes.mes);
+			if (result.fixed === 0) return;
+			const rendered = await applyFixedMessage(ctx, messageId, result.text);
+			console.log(`[TagAutoFixer] 自动修复 ${result.fixed} 个标签 (message ${messageId})`);
+			toastr?.success?.(rendered
+				? `✅ 自动修复 ${result.fixed} 个标签`
+				: `✅ 自动修复 ${result.fixed} 个标签（可能需要切换聊天以刷新显示）`);
+		} catch (e) {
+			console.error('[TagAutoFixer] 自动修复失败:', e);
+		}
+	});
+}
+
 async function fixLastMessage() {
 	try {
 		const ctx = getContext();
@@ -619,8 +932,7 @@ async function fixLastMessage() {
 		if (lastIdx < 0) { toastr?.warning?.('未找到AI消息'); return; }
 
 		const lastMsg = ctx.chat[lastIdx];
-		const originalText = lastMsg.mes;
-		const result = fixTagsInText(originalText);
+		const result = fixTagsInText(lastMsg.mes);
 
 		if (result.fixed === 0) {
 			toastr?.success?.('✅ 所有标签均已正确闭合');
@@ -628,42 +940,7 @@ async function fixLastMessage() {
 		}
 
 		console.log(`[TagAutoFixer] 修复了 ${result.fixed} 个标签`);
-
-		// TavernHelper 是 Slash Runner 暴露到 window 的稳定 API
-		// setChatMessages 同时负责数据更新 + 保存 + 触发渲染（含 Regex 美化）
-		const TH = window.TavernHelper;
-		let rendered = false;
-
-		if (TH?.setChatMessages) {
-			try {
-				await TH.setChatMessages([{ message_id: lastIdx, message: result.text }]);
-				rendered = true;
-				console.log('[TagAutoFixer] 通过 TavernHelper.setChatMessages 触发渲染');
-			} catch (e) {
-				console.warn('[TagAutoFixer] TavernHelper.setChatMessages 失败:', e);
-			}
-		}
-
-		if (!rendered && TH?.refreshOneMessage) {
-			// 回退：手动写数据 + 保存 + 单独触发渲染
-			try {
-				lastMsg.mes = result.text;
-				if (ctx.saveChat) await ctx.saveChat();
-				await TH.refreshOneMessage(lastIdx);
-				rendered = true;
-				console.log('[TagAutoFixer] 通过 TavernHelper.refreshOneMessage 触发渲染');
-			} catch (e) {
-				console.warn('[TagAutoFixer] refreshOneMessage 失败:', e);
-			}
-		}
-
-		if (!rendered) {
-			// 最后回退：手动保存 + DOM
-			lastMsg.mes = result.text;
-			if (ctx.saveChat) await ctx.saveChat();
-			console.log('[TagAutoFixer] 已保存数据但未能触发渲染');
-		}
-
+		const rendered = await applyFixedMessage(ctx, lastIdx, result.text);
 		toastr?.success?.(rendered
 			? `✅ 已修复 ${result.fixed} 个标签`
 			: `✅ 已修复 ${result.fixed} 个标签（可能需要切换聊天以刷新显示）`);
@@ -799,6 +1076,21 @@ jQuery(async () => {
 	<button id="${extensionName}_scan_append" class="menu_button" style="flex:1;padding:6px;font-size:0.9em">📎 补充扫描</button>
 	</div>
 	<button id="${extensionName}_btn" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">🔧 修复最后一条消息</button>
+	<button id="${extensionName}_reset" class="menu_button" style="width:100%;padding:6px;font-size:0.9em;margin-top:4px">↺ 重置为默认标签树</button>
+
+	<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grey_outline, rgba(128,128,128,.2));font-size:0.8em;display:flex;flex-direction:column;gap:6px">
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_auto" ${settings.autoFixEnabled ? 'checked' : ''}> 每轮输出结束自动修复</label>
+	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_wrap" ${settings.wrapMissingEnabled ? 'checked' : ''}> ⚠️ 智能补全（谨慎勾选）</label>
+	</div>
+	<div id="${extensionName}_wrap_warn" style="display:none;margin-top:6px;padding:8px;border:1px solid var(--golden-color, #e0a800);border-radius:6px;font-size:0.75em;color:var(--grey_color);line-height:1.6">
+	<b>智能补全 · 先读完再勾</b><br>
+	这个功能是给 AI 的"整块标签一起弄丢"救场：<br>
+	比如 <code>&lt;Advance&gt;...&lt;/Advance&gt;</code> 整对不见了，只剩里面的 <code>&lt;choice&gt;</code>。<br>
+	插件会根据标签树和前后邻居，把整块<b>猜</b>回来。<br>
+	✅ 标签没丢的正常消息，永远不会被改动。<br>
+	⚠️ 但"猜"偶尔会猜错、猜多，<b>有一定意外可能</b>。<br>
+	💡 出问题别慌：聊天页面右下角会冒出一个<b>「↩️ 回退修复」</b>按钮，点一下立刻还原。
+	</div>
 
 	<div style="margin-top:8px;font-size:0.8em;display:flex;gap:12px;align-items:center">
 	<label style="cursor:pointer"><input type="checkbox" id="${extensionName}_chk_inline" ${settings.showInlineBtn ? 'checked' : ''}> 输入框旁</label>
@@ -847,4 +1139,22 @@ jQuery(async () => {
 		saveSettingsDebounced();
 		updateMenuItem();
 	});
+
+	// 新功能勾选框
+	$(`#${extensionName}_chk_auto`).on('change', function() {
+		settings.autoFixEnabled = this.checked;
+		saveSettingsDebounced();
+	});
+	$(`#${extensionName}_chk_wrap`).on('change', function() {
+		settings.wrapMissingEnabled = this.checked;
+		$(`#${extensionName}_wrap_warn`).toggle(this.checked);
+		saveSettingsDebounced();
+	});
+	// 若之前已勾选，初始就展开说明
+	if (settings.wrapMissingEnabled) $(`#${extensionName}_wrap_warn`).show();
+
+	// 自动修复监听（每轮 AI 输出结束自动修）
+	registerAutoFix();
+	// 切换聊天时，隐藏上一个聊天的"回退修复"按钮
+	eventSource.on(event_types.CHAT_CHANGED, () => updateUndoBtn());
 });
