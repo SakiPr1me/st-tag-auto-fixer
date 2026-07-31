@@ -18,9 +18,9 @@ summary
 extra
 NG_scene`;
 
-// HTML 黑名单默认值：扫描时跳过这些名字，避免 AI 随手生成的 HTML 混进标签树。
-// 可在设置面板里增删；若某名字已写进标签树（如 RP 标签 I 恰好叫 I），永远不会被滤。
-const DEFAULT_HTML_BLACKLIST = [
+// 内部 HTML 标签签名（用户不可见、不需要管理）：扫描时用于识别"本身就是 HTML 噪音"的名字。
+// summary 已特意移除——它是很多 RP 格式的正式标签，交给标签树声明来保护，绝不当作噪音滤掉。
+const HTML_TAG_NAMES = [
 	'html', 'head', 'body', 'div', 'span', 'p', 'b', 'i', 'em', 'strong', 'u', 's',
 	'small', 'sub', 'sup', 'br', 'hr', 'a', 'img', 'ul', 'ol', 'li', 'table', 'tr',
 	'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code',
@@ -29,7 +29,7 @@ const DEFAULT_HTML_BLACKLIST = [
 	'title', 'font', 'center', 'marquee', 'abbr', 'cite', 'mark', 'ins', 'del',
 	'kbd', 'samp', 'var', 'q', 'iframe', 'video', 'audio', 'caption', 'tbody',
 	'thead', 'tfoot', 'col', 'colgroup', 'fieldset', 'legend', 'textarea', 'details',
-	'summary', 'dialog', 'main', 'figure', 'figcaption', 'picture', 'source', 'track',
+	'dialog', 'main', 'figure', 'figcaption', 'picture', 'source', 'track',
 ];
 
 const defaultSettings = {
@@ -41,7 +41,6 @@ const defaultSettings = {
 	wrapMissingEnabled: false, // 智能补全：标签整块丢失时推断补回（默认关，谨慎勾选）
 	htmlContainer: 'extra',   // 小剧场/HTML 容器标签：扫描时其内部一律跳过（可多个，一行一个）
 	autoDetectContainer: true, // 扫描时自动识别小剧场容器（护栏：只填"树外未知顶层块"）
-	htmlBlacklist: DEFAULT_HTML_BLACKLIST.join('\n'), // 扫描时跳过的 HTML 标签（兜底，可增删）
 };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
@@ -51,7 +50,6 @@ if (settings.showFloatingBtn === undefined) settings.showFloatingBtn = false;
 if (settings.showMenuBtn === undefined) settings.showMenuBtn = true;
 if (settings.autoFixEnabled === undefined) settings.autoFixEnabled = false;
 if (settings.wrapMissingEnabled === undefined) settings.wrapMissingEnabled = false;
-if (settings.htmlBlacklist === undefined) settings.htmlBlacklist = DEFAULT_HTML_BLACKLIST.join('\n');
 if (settings.htmlContainer === undefined) settings.htmlContainer = 'extra';
 if (settings.autoDetectContainer === undefined) settings.autoDetectContainer = true;
 
@@ -160,9 +158,9 @@ function scanAndFill(replaceMode = false) {
 	clean = clean.replace(/<story_plot[\s\S]*?<\/story_plot>/gi, '');
 	clean = clean.replace(/<output_format>[\s\S]*?<\/output_format>/gi, '');
 
-	// HTML 黑名单：从设置读取（设置面板可增删）。扫描时跳过这些名字，避免 AI 随手生成的 <b>/<i>/<div>/<br> 混进标签树。
+	// HTML 签名名单（内部固定，无需用户管理）：扫描时跳过这些名字，避免 AI 随手生成的 <b>/<i>/<div>/<br> 混进标签树。
 	// 规则：名字已在"当前标签树"里声明的（如 RP 标签 I 恰好叫 I）→ 永不滤，尊重用户自己的结构标签。
-	const HTML_TAGS = new Set((settings.htmlBlacklist || '').split(/[\s,]+/).filter(Boolean));
+	const HTML_TAGS = new Set(HTML_TAG_NAMES);
 	const treeNames = new Set(settings.tagTree.split('\n').map(l => l.trim()).filter(Boolean));
 
 	// 小剧场/HTML 容器：用户可配置的标签名（默认 extra）。扫描时这些标签的内部一律跳过（保留标签本身）。
@@ -1194,14 +1192,10 @@ jQuery(async () => {
 	<p style="font-size:0.75em;color:var(--grey_color);margin-bottom:3px">① 小剧场/HTML 容器标签（扫描时这些标签的<b>内部一律跳过</b>，一个一行）：</p>
 	<textarea id="${extensionName}_container" class="text_pole" style="width:100%;height:40px;font-family:monospace">${settings.htmlContainer}</textarea>
 	<label style="cursor:pointer;font-size:0.75em;display:flex;align-items:center;gap:4px;margin-top:4px"><input type="checkbox" id="${extensionName}_chk_detect" ${settings.autoDetectContainer ? 'checked' : ''}> 扫描时自动识别（发现明显 HTML 特征的最外层未知标签 → 自动填入）</label>
-	<p style="font-size:0.75em;color:var(--grey_color);margin-top:6px;margin-bottom:3px">② HTML 黑名单（兜底，容器之外的保险丝）：</p>
-	<textarea id="${extensionName}_htmlbl" class="text_pole" style="width:100%;height:60px;font-family:monospace">${settings.htmlBlacklist}</textarea>
-	<div style="display:flex;gap:6px;margin-top:4px">
-	<button id="${extensionName}_htmlbl_reset" class="menu_button" style="flex:1;padding:4px;font-size:0.8em">↺ 黑名单恢复默认</button>
-	</div>
-	<p style="font-size:0.7em;color:var(--grey_color);margin-top:3px;line-height:1.5">
+	<p style="font-size:0.7em;color:var(--grey_color);margin-top:6px;line-height:1.5">
 	默认容器是 <code>extra</code>；不是所有人都用 extra——改成你自己的即可。<br>
-	<b>已写进标签树的名字永远不会被滤/跳过</b>；自动识别也只填"树外未知顶层块"，不会动 content 这类已声明块。
+	<b>已写进标签树的名字永远不会被滤/跳过</b>；自动识别也只填"树外未知顶层块"，不会动 content 这类已声明块。<br>
+	HTML 噪音（<code>&lt;div&gt;</code>/<code>&lt;b&gt;</code> 等）由插件自动识别，无需你管理；<code>summary</code> 这类正式标签不受影响。
 	</p>
 	</div>
 
@@ -1247,7 +1241,7 @@ jQuery(async () => {
 		saveSettingsDebounced();
 	});
 
-	// 小剧场/HTML 处理：展开/收起 + 容器编辑 + 自动识别开关 + 黑名单编辑/恢复
+	// 小剧场/HTML 处理：展开/收起 + 容器编辑 + 自动识别开关
 	$(`#${extensionName}_htmlbl_toggle`).on('click', () => { $(`#${extensionName}_htmlbl_box`).slideToggle(150); });
 	$(`#${extensionName}_container`).on('input', function() {
 		settings.htmlContainer = $(this).val();
@@ -1256,16 +1250,6 @@ jQuery(async () => {
 	$(`#${extensionName}_chk_detect`).on('change', function() {
 		settings.autoDetectContainer = this.checked;
 		saveSettingsDebounced();
-	});
-	$(`#${extensionName}_htmlbl`).on('input', function() {
-		settings.htmlBlacklist = $(this).val();
-		saveSettingsDebounced();
-	});
-	$(`#${extensionName}_htmlbl_reset`).on('click', () => {
-		settings.htmlBlacklist = DEFAULT_HTML_BLACKLIST.join('\n');
-		$(`#${extensionName}_htmlbl`).val(settings.htmlBlacklist);
-		saveSettingsDebounced();
-		toastr?.success?.('✅ 已恢复默认 HTML 黑名单');
 	});
 
 	// 绑定按钮
