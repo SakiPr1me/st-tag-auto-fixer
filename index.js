@@ -41,7 +41,7 @@ const defaultSettings = {
 	autoFixEnabled: false,   // 每轮输出结束自动修（默认关，谨慎勾选）
 	wrapMissingEnabled: false, // 智能补全：标签整块丢失时推断补回（默认关，谨慎勾选）
 	htmlContainer: 'extra',   // 小剧场/HTML 容器标签：扫描时其内部一律跳过（可多个，一行一个）
-	autoDetectContainer: true, // 扫描时自动识别小剧场容器（护栏：只填"树外未知顶层块"）
+	askOnDisputed: true,      // 扫描时发现"不在树里的疑似 HTML 块" → 弹窗让用户选：进树还是进容器
 };
 if (!extension_settings[extensionName]) extension_settings[extensionName] = defaultSettings;
 const settings = extension_settings[extensionName];
@@ -52,7 +52,11 @@ if (settings.showMenuBtn === undefined) settings.showMenuBtn = true;
 if (settings.autoFixEnabled === undefined) settings.autoFixEnabled = false;
 if (settings.wrapMissingEnabled === undefined) settings.wrapMissingEnabled = false;
 if (settings.htmlContainer === undefined) settings.htmlContainer = 'extra';
-if (settings.autoDetectContainer === undefined) settings.autoDetectContainer = true;
+if (settings.askOnDisputed === undefined) {
+	// 迁移旧键 autoDetectContainer（旧版是"自动填入容器"，现在改成"弹窗询问"）
+	settings.askOnDisputed = settings.autoDetectContainer !== undefined ? settings.autoDetectContainer : true;
+	delete settings.autoDetectContainer;
+}
 
 // ========== 解析标签树（缩进 → 嵌套层级）==========
 
@@ -140,9 +144,36 @@ function detectHtmlContainer(mes, treeNames, containerNames, excludeTags) {
 	return [...new Set(cands)];
 }
 
+// ========== 询问用户：争议块进树还是进容器 ==========
+// 返回 Promise<'container' | 'tree' | 'ignore'>
+function askContainerChoice(candidate) {
+	return new Promise((resolve) => {
+		const modalId = `${extensionName}_ask_modal`;
+		$(`#${modalId}`).remove();
+		const $overlay = $(`
+			<div id="${modalId}" style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center">
+			<div style="background:var(--secondary-surface,#fff);border-radius:8px;padding:18px 22px;max-width:440px;box-shadow:0 4px 20px rgba(0,0,0,.4)">
+			<b style="font-size:0.95em">🔍 检测到疑似小剧场/HTML 块</b>
+			<p style="font-size:0.8em;margin:8px 0;color:var(--grey_color);line-height:1.5">
+			标签 <code>&lt;${candidate}&gt;</code> 不在你的标签树里，但内部有明显 HTML 特征。<br>
+			你希望它作为？
+			</p>
+			<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+			<button class="menu_button" data-v="tree">🌳 进树（结构标签）</button>
+			<button class="menu_button" data-v="container">📦 进容器（HTML/小剧场）</button>
+			</div>
+			</div>
+			</div>`);
+		$('body').append($overlay);
+		const done = (v) => { $overlay.remove(); resolve(v); };
+		$overlay.find('button').on('click', function() { done($(this).attr('data-v')); });
+		$overlay.on('click', function(e) { if (e.target === this) done('ignore'); });
+	});
+}
+
 // ========== 扫描消息、重建标签树 ==========
 
-function scanAndFill(replaceMode = false) {
+async function scanAndFill(replaceMode = false) {
 	const ctx = getContext();
 	if (!ctx?.chat?.length) { toastr?.warning?.('没有聊天消息'); return; }
 
@@ -165,17 +196,26 @@ function scanAndFill(replaceMode = false) {
 	// 小剧场/HTML 容器：用户可配置的标签名（默认 extra）。扫描时这些标签的内部一律跳过（保留标签本身）。
 	let containerNames = new Set((settings.htmlContainer || '').split(/[\s,]+/).filter(Boolean));
 
-	// 自动识别（可选）：发现"树外未知顶层块 + 明显 HTML 特征" → 自动把它加进容器名单。
-	// HTML 标签本身（div/span 等）绝不会被填成容器。
-	if (settings.autoDetectContainer) {
-		const cands = detectHtmlContainer(lastMsg.mes, treeNames, containerNames, new Set(HTML_TAG_NAMES));
-		if (cands.length === 1 && !containerNames.has(cands[0])) {
-			containerNames.add(cands[0]);
-			settings.htmlContainer = [...containerNames].join('\n');
-			saveSettingsDebounced();
-			toastr?.info?.(`🔍 检测到疑似小剧场标签 <${cands[0]}>，已自动加入跳过列表（可在设置里改）`);
-		} else if (cands.length > 1) {
-			toastr?.info?.(`🔍 检测到多个疑似小剧场标签（${cands.join('、')}），请在设置里手动指定`);
+	// 争议块询问（可选）：发现"树外未知顶层块 + 明显 HTML 特征" → 弹窗让用户决定：进树还是进容器。
+	// HTML 标签本身（div/span 等）绝不会出现在候选里。
+	if (settings.askOnDisputed) {
+		try {
+			const cands = detectHtmlContainer(lastMsg.mes, treeNames, containerNames, new Set(HTML_TAG_NAMES));
+			if (cands.length === 1 && !containerNames.has(cands[0])) {
+				const choice = await askContainerChoice(cands[0]);
+				if (choice === 'container') {
+					containerNames.add(cands[0]);
+					settings.htmlContainer = [...containerNames].join('\n');
+					saveSettingsDebounced();
+					toastr?.info?.(`📦 <${cands[0]}> 已加入容器名单（以后扫描内部一律跳过）`);
+				} else if (choice === 'tree') {
+					toastr?.info?.(`🌳 <${cands[0]}> 将按结构标签扫描进树`);
+				}
+			} else if (cands.length > 1) {
+				toastr?.info?.(`🔍 检测到多个疑似小剧场标签（${cands.join('、')}），请在设置里手动指定`);
+			}
+		} catch (e) {
+			console.warn('[TagAutoFixer] 弹窗询问失败:', e);
 		}
 	}
 
@@ -1190,14 +1230,13 @@ jQuery(async () => {
 	<div id="${extensionName}_html_box" style="display:none">
 	<p style="font-size:0.75em;color:var(--grey_color);margin-bottom:3px">① 容器标签（扫描时这些标签的<b>内部一律跳过</b>、保留标签本身。一个一行，可多个）：</p>
 	<textarea id="${extensionName}_container" class="text_pole" style="width:100%;height:40px;font-family:monospace">${settings.htmlContainer}</textarea>
-	<label style="cursor:pointer;font-size:0.75em;display:flex;align-items:center;gap:4px;margin-top:4px"><input type="checkbox" id="${extensionName}_chk_detect" ${settings.autoDetectContainer ? 'checked' : ''}> 扫描时自动识别（发现明显 HTML 特征的最外层未知标签 → 自动填入）</label>
+	<label style="cursor:pointer;font-size:0.75em;display:flex;align-items:center;gap:4px;margin-top:4px"><input type="checkbox" id="${extensionName}_chk_detect" ${settings.askOnDisputed ? 'checked' : ''}> 扫描时询问（发现不在标签树里的疑似 HTML 块 → 弹窗让你选进树还是进容器）</label>
 	<p style="font-size:0.72em;color:var(--grey_color);margin-top:6px;line-height:1.6">
 	<b>这个容器是干什么的？</b><br>
 	AI 偶尔会吐 HTML 或小剧场内容（<code>&lt;div&gt;</code>/<code>&lt;b&gt;</code> 等）。让 AI 把这类内容放进一个专属标签块（默认 <code>extra</code>），扫描时这些块的<b>内部整体跳过</b>，HTML 就不会混进标签树。<br>
 	不是所有人都用 <code>extra</code>——改成你自己的容器名即可；有几个就一行一个。<br>
 	<b>已写进标签树的名字永远不会被跳过</b>。<br>
-	「自动识别」：扫描时若发现某个"不在标签树里的顶层块"内部有明显 HTML 特征，会自动把它的名字填进上面，并弹提示。<br>
-	💡 没有黑名单了——任何标签都能正常扫进树；扫进去后发现是噪音，删掉它或把它加进容器即可。
+	「扫描时询问」：扫描时若发现某个"不在标签树里的顶层块"内部有明显 HTML 特征，会弹窗让你选：按结构进树，还是进容器（HTML）。
 	</p>
 	</div>
 
@@ -1250,7 +1289,7 @@ jQuery(async () => {
 		saveSettingsDebounced();
 	});
 	$(`#${extensionName}_chk_detect`).on('change', function() {
-		settings.autoDetectContainer = this.checked;
+		settings.askOnDisputed = this.checked;
 		saveSettingsDebounced();
 	});
 
